@@ -1,0 +1,124 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('gcElectron', {
+  codexStatus: () => ipcRenderer.invoke('codex:status'),
+  codexStart: () => ipcRenderer.invoke('codex:start'),
+  codexRestart: () => ipcRenderer.invoke('codex:restart'),
+  codexAccountRead: () => ipcRenderer.invoke('codex:account-read'),
+  codexLoginStart: () => ipcRenderer.invoke('codex:login-start'),
+  codexLogout: () => ipcRenderer.invoke('codex:logout'),
+  codexRateLimitsRead: () => ipcRenderer.invoke('codex:rate-limits-read'),
+  codexModelList: () => ipcRenderer.invoke('codex:model-list'),
+  codexThreadList: (req) => ipcRenderer.invoke('codex:thread-list', req ?? {}),
+  codexThreadRead: (req) => ipcRenderer.invoke('codex:thread-read', req ?? {}),
+  codexTestTurnStart: (req) => ipcRenderer.invoke('codex:test-turn-start', req ?? {}),
+  codexWorkingFolderDefault: () => ipcRenderer.invoke('codex:working-folder-default'),
+  codexWorkingFolderPick: (req) => ipcRenderer.invoke('codex:working-folder-pick', req ?? {}),
+  codexGraphTurnStart: (req) => ipcRenderer.invoke('codex:graph-turn-start', req ?? {}),
+  codexTurnInterrupt: (req) => ipcRenderer.invoke('codex:turn-interrupt', req ?? {}),
+  codexRespondToServerRequest: (req) => ipcRenderer.invoke('codex:server-request-respond', req ?? {}),
+  codexOnEvent: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const listener = (_event, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore listener errors
+      }
+    };
+    ipcRenderer.on('codex:event', listener);
+    return () => {
+      ipcRenderer.removeListener('codex:event', listener);
+    };
+  },
+  compileLatex: (req) => ipcRenderer.invoke('latex:compile', req ?? {}),
+  pickLatexProject: () => ipcRenderer.invoke('latex:pick-project'),
+  listLatexProjectFiles: (req) => ipcRenderer.invoke('latex:list-project-files', req ?? {}),
+  readLatexProjectFile: (req) => ipcRenderer.invoke('latex:read-project-file', req ?? {}),
+  writeLatexProjectFile: (req) => ipcRenderer.invoke('latex:write-project-file', req ?? {}),
+  synctexForward: (req) => ipcRenderer.invoke('latex:synctex-forward', req ?? {}),
+  synctexInverse: (req) => ipcRenderer.invoke('latex:synctex-inverse', req ?? {}),
+  latexToolchainStatus: () => ipcRenderer.invoke('latex:toolchain-status'),
+  getWindowMode: () => ipcRenderer.invoke('window:get-mode'),
+  onWindowModeChanged: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const listener = (_event, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore listener errors
+      }
+    };
+    ipcRenderer.on('window:mode-changed', listener);
+    return () => {
+      ipcRenderer.removeListener('window:mode-changed', listener);
+    };
+  },
+  showAppMenu: (req) => ipcRenderer.invoke('app-menu:show', req ?? {}),
+  onBeforeClose: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const listener = () => {
+      try {
+        cb();
+      } catch {
+        // ignore listener errors
+      }
+    };
+    ipcRenderer.on('app:before-close', listener);
+    return () => {
+      ipcRenderer.removeListener('app:before-close', listener);
+    };
+  },
+  notifyCloseReady: () => ipcRenderer.send('app:close-ready'),
+  storageGetWorkspaceSnapshot: () => ipcRenderer.invoke('storage:get-workspace-snapshot'),
+  storagePutWorkspaceSnapshot: (req) => ipcRenderer.invoke('storage:put-workspace-snapshot', req ?? {}),
+  storageDeleteWorkspaceSnapshot: () => ipcRenderer.invoke('storage:delete-workspace-snapshot'),
+  storageGetChatStateRecord: (req) => ipcRenderer.invoke('storage:get-chat-state-record', req ?? {}),
+  storagePutChatStateRecord: (req) => ipcRenderer.invoke('storage:put-chat-state-record', req ?? {}),
+  storageDeleteChatStateRecord: (req) => ipcRenderer.invoke('storage:delete-chat-state-record', req ?? {}),
+  storageGetChatMetaRecord: (req) => ipcRenderer.invoke('storage:get-chat-meta-record', req ?? {}),
+  storagePutChatMetaRecord: (req) => ipcRenderer.invoke('storage:put-chat-meta-record', req ?? {}),
+  storageDeleteChatMetaRecord: (req) => ipcRenderer.invoke('storage:delete-chat-meta-record', req ?? {}),
+  storageGetPayload: (req) => ipcRenderer.invoke('storage:get-payload', req ?? {}),
+  storagePutPayload: (req) => ipcRenderer.invoke('storage:put-payload', req ?? {}),
+  storageDeletePayload: (req) => ipcRenderer.invoke('storage:delete-payload', req ?? {}),
+  storagePutAttachment: (req) => ipcRenderer.invoke('storage:put-attachment', req ?? {}),
+  storageGetAttachment: (req) => ipcRenderer.invoke('storage:get-attachment', req ?? {}),
+  storageDeleteAttachment: (req) => ipcRenderer.invoke('storage:delete-attachment', req ?? {}),
+  storageListAttachmentKeys: () => ipcRenderer.invoke('storage:list-attachment-keys'),
+  storageDeleteAttachments: (req) => ipcRenderer.invoke('storage:delete-attachments', req ?? {}),
+  storageDeleteChatFolder: (req) => ipcRenderer.invoke('storage:delete-chat-folder', req ?? {}),
+  storageGetDataDirInfo: () => ipcRenderer.invoke('storage:get-data-dir-info'),
+  storageChooseDataDir: (req) => ipcRenderer.invoke('storage:choose-data-dir', req ?? {}),
+  storageResetDataDir: (req) => ipcRenderer.invoke('storage:reset-data-dir', req ?? {}),
+  storageOpenDataDir: () => ipcRenderer.invoke('storage:open-data-dir'),
+  storageGetCloudSyncInfo: () => ipcRenderer.invoke('storage:get-cloud-sync-info'),
+  storageChooseCloudSyncDir: () => ipcRenderer.invoke('storage:choose-cloud-sync-dir'),
+  storageUnlinkCloudSyncDir: () => ipcRenderer.invoke('storage:unlink-cloud-sync-dir'),
+  storageOpenCloudSyncDir: () => ipcRenderer.invoke('storage:open-cloud-sync-dir'),
+  storageCloudSyncPush: (req) => ipcRenderer.invoke('storage:cloud-sync-push', req ?? {}),
+  storageCloudSyncPull: () => ipcRenderer.invoke('storage:cloud-sync-pull'),
+  storageGetLocalSyncBackupInfo: () => ipcRenderer.invoke('storage:get-local-sync-backup-info'),
+  storageDeleteLocalSyncBackup: () => ipcRenderer.invoke('storage:delete-local-sync-backup'),
+  storageGoogleDriveSyncInfo: () => ipcRenderer.invoke('storage:google-drive-sync-info'),
+  storageGoogleDriveSyncLink: (req) => ipcRenderer.invoke('storage:google-drive-sync-link', req ?? {}),
+  storageGoogleDriveSyncUnlink: () => ipcRenderer.invoke('storage:google-drive-sync-unlink'),
+  storageGoogleDriveSyncOpenFolder: () => ipcRenderer.invoke('storage:google-drive-sync-open-folder'),
+  storageGoogleDriveSyncPush: (req) => ipcRenderer.invoke('storage:google-drive-sync-push', req ?? {}),
+  storageGoogleDriveSyncPull: () => ipcRenderer.invoke('storage:google-drive-sync-pull'),
+  storageGoogleDriveSyncOnProgress: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const listener = (_event, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore listener errors
+      }
+    };
+    ipcRenderer.on('storage:google-drive-sync-progress', listener);
+    return () => {
+      ipcRenderer.removeListener('storage:google-drive-sync-progress', listener);
+    };
+  },
+  storageClearAll: () => ipcRenderer.invoke('storage:clear-all'),
+});

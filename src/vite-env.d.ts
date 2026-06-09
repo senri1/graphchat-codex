@@ -1,0 +1,377 @@
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly OPENAI_API_KEY?: string;
+  readonly GEMINI_API_KEY?: string;
+  readonly XAI_API_KEY?: string;
+  readonly ANTHROPIC_API_KEY?: string;
+  readonly ANTHROPIC_BETA?: string;
+  readonly VITE_OPENAI_API_KEY?: string;
+  readonly VITE_XAI_API_KEY?: string;
+  readonly VITE_ANTHROPIC_API_KEY?: string;
+  readonly VITE_ANTHROPIC_BETA?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
+interface Window {
+  gcElectron?: {
+    codexStatus: () => Promise<{ ok: boolean; status?: any; error?: string }>;
+    codexStart: () => Promise<{ ok: boolean; status?: any; error?: string }>;
+    codexRestart: () => Promise<{ ok: boolean; status?: any; error?: string }>;
+    codexAccountRead: () => Promise<{ ok: boolean; result?: any; error?: string }>;
+    codexLoginStart: () => Promise<{ ok: boolean; result?: any; error?: string }>;
+    codexLogout: () => Promise<{ ok: boolean; result?: any; error?: string }>;
+    codexRateLimitsRead: () => Promise<{ ok: boolean; result?: any; error?: string }>;
+    codexModelList: () => Promise<{ ok: boolean; result?: any; error?: string }>;
+    codexThreadList: (req?: { cursor?: string | null; limit?: number; searchTerm?: string }) => Promise<{
+      ok: boolean;
+      result?: { data?: any[]; nextCursor?: string | null };
+      error?: string;
+    }>;
+    codexThreadRead: (req: { threadId: string }) => Promise<{
+      ok: boolean;
+      result?: { thread?: any };
+      error?: string;
+    }>;
+    codexTestTurnStart: (req: { model: string; effort?: string; prompt: string }) => Promise<{
+      ok: boolean;
+      result?: { threadId: string; turnId: string };
+      error?: string;
+    }>;
+    codexWorkingFolderDefault: () => Promise<{ ok: boolean; path?: string; error?: string }>;
+    codexWorkingFolderPick: (req?: { defaultPath?: string }) => Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      path?: string;
+      error?: string;
+    }>;
+    codexGraphTurnStart: (req: {
+      clientTag: string;
+      cwd: string;
+      prompt: string;
+      model: string;
+      effort?: string;
+      developerInstructions?: string;
+      source?: { threadId: string; turnId: string } | null;
+    }) => Promise<{
+      ok: boolean;
+      result?: {
+        clientTag: string;
+        threadId: string;
+        turnId: string;
+        mode: 'new' | 'continue' | 'fork';
+        rolledBackTurns: number;
+        forkedFromThreadId?: string | null;
+      };
+      error?: string;
+    }>;
+    codexTurnInterrupt: (req: { threadId: string; turnId: string }) => Promise<{
+      ok: boolean;
+      result?: any;
+      error?: string;
+    }>;
+    codexRespondToServerRequest: (req: { id: string | number; result: any }) => Promise<{
+      ok: boolean;
+      error?: string;
+    }>;
+    codexOnEvent?: (cb: (payload: any) => void) => () => void;
+    compileLatex: (req: {
+      source?: string;
+      projectRoot?: string;
+      mainFile?: string;
+      engine?: 'pdflatex' | 'xelatex' | 'lualatex';
+    }) => Promise<{
+      ok: boolean;
+      pdfBase64?: string;
+      log?: string;
+      error?: string;
+    }>;
+    pickLatexProject: () => Promise<{ ok: boolean; projectRoot?: string; error?: string }>;
+    listLatexProjectFiles: (req: { projectRoot: string }) => Promise<{
+      ok: boolean;
+      files?: Array<{ path: string; kind: 'tex' | 'bib' | 'style' | 'class' | 'asset' | 'other'; editable: boolean }>;
+      suggestedMainFile?: string | null;
+      error?: string;
+    }>;
+    readLatexProjectFile: (req: { projectRoot: string; path: string }) => Promise<{ ok: boolean; content?: string; error?: string }>;
+    writeLatexProjectFile: (req: { projectRoot: string; path: string; content: string }) => Promise<{ ok: boolean; error?: string }>;
+    synctexForward: (req: {
+      projectRoot: string;
+      mainFile: string;
+      sourceFile: string;
+      line: number;
+    }) => Promise<{ ok: boolean; page?: number; x?: number | null; y?: number | null; error?: string; log?: string }>;
+    synctexInverse: (req: {
+      projectRoot: string;
+      mainFile: string;
+      page: number;
+      x: number;
+      y: number;
+    }) => Promise<{
+      ok: boolean;
+      filePath?: string | null;
+      line?: number;
+      column?: number | null;
+      sourcePathRaw?: string;
+      error?: string;
+      log?: string;
+    }>;
+    latexToolchainStatus: () => Promise<{ ok: boolean; latexmk?: boolean; synctex?: boolean; error?: string }>;
+    getWindowMode: () => Promise<{
+      mode?: string;
+      transparentTitlebar?: boolean;
+      titleBarOverlayHeight?: number;
+      isFullScreen?: boolean;
+    }>;
+    onWindowModeChanged?: (cb: (mode: {
+      mode?: string;
+      transparentTitlebar?: boolean;
+      titleBarOverlayHeight?: number;
+      isFullScreen?: boolean;
+    }) => void) => () => void;
+    showAppMenu: (req: { index: number }) => Promise<{ ok: boolean; error?: string }>;
+    onBeforeClose?: (cb: () => void) => () => void;
+    notifyCloseReady?: () => void;
+    storageGetWorkspaceSnapshot: () => Promise<{ ok: boolean; snapshot?: unknown | null; error?: string }>;
+    storagePutWorkspaceSnapshot: (req: { snapshot: unknown }) => Promise<{ ok: boolean; error?: string }>;
+    storageDeleteWorkspaceSnapshot: () => Promise<{ ok: boolean; error?: string }>;
+    storageGetChatStateRecord: (req: { chatId: string }) => Promise<{ ok: boolean; record?: unknown | null; error?: string }>;
+    storagePutChatStateRecord: (req: { chatId: string; state: unknown }) => Promise<{ ok: boolean; error?: string }>;
+    storageDeleteChatStateRecord: (req: { chatId: string }) => Promise<{ ok: boolean; error?: string }>;
+    storageGetChatMetaRecord: (req: { chatId: string }) => Promise<{ ok: boolean; record?: unknown | null; error?: string }>;
+    storagePutChatMetaRecord: (req: { chatId: string; meta: unknown }) => Promise<{ ok: boolean; error?: string }>;
+    storageDeleteChatMetaRecord: (req: { chatId: string }) => Promise<{ ok: boolean; error?: string }>;
+    storageGetPayload: (req: { key: string }) => Promise<{ ok: boolean; payload?: unknown | null; error?: string }>;
+    storagePutPayload: (req: { key: string; json: unknown }) => Promise<{ ok: boolean; error?: string }>;
+    storageDeletePayload: (req: { key: string }) => Promise<{ ok: boolean; error?: string }>;
+    storagePutAttachment: (req: {
+      mimeType: string;
+      name?: string;
+      size?: number;
+      bytes: ArrayBuffer;
+    }) => Promise<{ ok: boolean; key?: string; error?: string }>;
+    storageGetAttachment: (req: { key: string }) => Promise<{
+      ok: boolean;
+      record?: {
+        key: string;
+        mimeType: string;
+        name?: string;
+        size?: number;
+        createdAt: number;
+        bytes: ArrayBuffer | Uint8Array;
+      } | null;
+      error?: string;
+    }>;
+    storageDeleteAttachment: (req: { key: string }) => Promise<{ ok: boolean; error?: string }>;
+    storageListAttachmentKeys: () => Promise<{ ok: boolean; keys?: string[]; error?: string }>;
+    storageDeleteAttachments: (req: { keys: string[] }) => Promise<{ ok: boolean; error?: string }>;
+    storageDeleteChatFolder: (req: { chatId: string }) => Promise<{ ok: boolean; error?: string }>;
+    storageGetDataDirInfo: () => Promise<{
+      ok: boolean;
+      path?: string;
+      defaultPath?: string;
+      baseDir?: string;
+      defaultBaseDir?: string;
+      isDefault?: boolean;
+      error?: string;
+    }>;
+    storageChooseDataDir: (req?: { moveExisting?: boolean }) => Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      path?: string;
+      defaultPath?: string;
+      baseDir?: string;
+      defaultBaseDir?: string;
+      isDefault?: boolean;
+      moved?: boolean;
+      error?: string;
+    }>;
+    storageResetDataDir: (req?: { moveExisting?: boolean }) => Promise<{
+      ok: boolean;
+      path?: string;
+      defaultPath?: string;
+      baseDir?: string;
+      defaultBaseDir?: string;
+      isDefault?: boolean;
+      moved?: boolean;
+      error?: string;
+    }>;
+    storageOpenDataDir: () => Promise<{ ok: boolean; path?: string; error?: string }>;
+    storageGetCloudSyncInfo: () => Promise<{
+      ok: boolean;
+      connected?: boolean;
+      cloudDir?: string;
+      lastPulledRevision?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      error?: string;
+    }>;
+    storageChooseCloudSyncDir: () => Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      connected?: boolean;
+      cloudDir?: string;
+      lastPulledRevision?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      error?: string;
+    }>;
+    storageUnlinkCloudSyncDir: () => Promise<{
+      ok: boolean;
+      connected?: boolean;
+      cloudDir?: string;
+      lastPulledRevision?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      error?: string;
+    }>;
+    storageOpenCloudSyncDir: () => Promise<{ ok: boolean; path?: string; error?: string }>;
+    storageCloudSyncPush: (req?: { force?: boolean }) => Promise<{
+      ok: boolean;
+      connected?: boolean;
+      cloudDir?: string;
+      lastPulledRevision?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      pushedRevision?: string;
+      error?: string;
+    }>;
+    storageCloudSyncPull: () => Promise<{
+      ok: boolean;
+      connected?: boolean;
+      cloudDir?: string;
+      lastPulledRevision?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      pulledRevision?: string;
+      backupPath?: string;
+      error?: string;
+    }>;
+    storageGetLocalSyncBackupInfo: () => Promise<{
+      ok: boolean;
+      exists?: boolean;
+      backupPath?: string;
+      sizeBytes?: number;
+      updatedAt?: number;
+      error?: string;
+    }>;
+    storageDeleteLocalSyncBackup: () => Promise<{
+      ok: boolean;
+      deleted?: boolean;
+      exists?: boolean;
+      backupPath?: string;
+      sizeBytes?: number;
+      updatedAt?: number;
+      error?: string;
+    }>;
+    storageGoogleDriveSyncInfo: () => Promise<{
+      ok: boolean;
+      linked?: boolean;
+      clientId?: string;
+      hasClientSecret?: boolean;
+      folderId?: string;
+      lastPulledRevision?: string;
+      lastLinkError?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      remoteError?: string;
+      configPath?: string;
+      configExists?: boolean;
+      userDataPath?: string;
+      appName?: string;
+      error?: string;
+    }>;
+    storageGoogleDriveSyncLink: (req?: { clientId?: string; clientSecret?: string }) => Promise<{
+      ok: boolean;
+      linked?: boolean;
+      clientId?: string;
+      hasClientSecret?: boolean;
+      folderId?: string;
+      lastPulledRevision?: string;
+      lastLinkError?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      remoteError?: string;
+      configPath?: string;
+      configExists?: boolean;
+      userDataPath?: string;
+      appName?: string;
+      error?: string;
+    }>;
+    storageGoogleDriveSyncUnlink: () => Promise<{
+      ok: boolean;
+      linked?: boolean;
+      clientId?: string;
+      hasClientSecret?: boolean;
+      folderId?: string;
+      lastPulledRevision?: string;
+      lastLinkError?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      remoteError?: string;
+      configPath?: string;
+      configExists?: boolean;
+      userDataPath?: string;
+      appName?: string;
+      error?: string;
+    }>;
+    storageGoogleDriveSyncOpenFolder: () => Promise<{ ok: boolean; url?: string; error?: string }>;
+    storageGoogleDriveSyncPush: (req?: { force?: boolean }) => Promise<{
+      ok: boolean;
+      linked?: boolean;
+      clientId?: string;
+      hasClientSecret?: boolean;
+      folderId?: string;
+      lastPulledRevision?: string;
+      lastLinkError?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      remoteError?: string;
+      configPath?: string;
+      configExists?: boolean;
+      userDataPath?: string;
+      appName?: string;
+      pushedRevision?: string;
+      pushedFileCount?: number;
+      error?: string;
+    }>;
+    storageGoogleDriveSyncPull: () => Promise<{
+      ok: boolean;
+      linked?: boolean;
+      clientId?: string;
+      hasClientSecret?: boolean;
+      folderId?: string;
+      lastPulledRevision?: string;
+      lastLinkError?: string;
+      remoteHeadRevision?: string;
+      remoteHeadUpdatedAt?: number;
+      remoteError?: string;
+      configPath?: string;
+      configExists?: boolean;
+      userDataPath?: string;
+      appName?: string;
+      pulledRevision?: string;
+      pulledFileCount?: number;
+      backupPath?: string;
+      error?: string;
+    }>;
+    storageGoogleDriveSyncOnProgress?: (cb: (payload: {
+      opId?: string;
+      op?: 'push' | 'pull' | string;
+      at?: number;
+      done?: boolean;
+      stage?: string;
+      phaseIndex?: number;
+      phaseCount?: number;
+      message?: string;
+      error?: string;
+      indeterminate?: boolean;
+      completed?: number;
+      total?: number;
+    }) => void) => () => void;
+    storageClearAll: () => Promise<{ ok: boolean; error?: string }>;
+  };
+}
