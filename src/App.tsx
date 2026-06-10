@@ -283,7 +283,8 @@ function conversationContextDeveloperInstructions(base: string, cwd: string, cha
     'GraphChat Codex exposes the complete graph for this chat in the working folder, including nodes outside the current Codex thread history.',
     `Conversation context root: ${contextPath}`,
     `Current chat graph: ${chatPath}`,
-    'When a request may depend on previous discussions, notes, or other graph branches, search the current chat node Markdown files. Look in INDEX.md for other chats and consult graph.json when ancestry, branches, or checkpoints matter.',
+    `If information needed to answer the user's request is not available in the current thread, search the node Markdown files under ${chatPath}. If it may be in another chat, consult ${contextPath}/INDEX.md.`,
+    'Consult the current chat graph.json when ancestry, branches, or checkpoints matter.',
     'Files under nodes/documents are editable user documents. Files under nodes/conversation and generated INDEX.md, README.md, and graph.json files are read-only context.',
   ].join('\n');
   const trimmedBase = String(base ?? '').trim();
