@@ -87,6 +87,8 @@ export type ChatNode =
       };
       collapsedPrefaceContexts?: Record<number, boolean>;
       isEditNode?: boolean;
+      documentNode?: boolean;
+      conversationDraft?: boolean;
       isGenerating?: boolean;
       modelId?: string | null;
       llmParams?: ChatLlmParams;

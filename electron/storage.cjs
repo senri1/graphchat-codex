@@ -3,6 +3,7 @@ const fsSync = require('fs');
 const path = require('path');
 const http = require('http');
 const { randomUUID, randomBytes, createHash } = require('crypto');
+const { syncConversationContext } = require('./conversation-context-storage.cjs');
 
 const STORAGE_ROOT_DIRNAME = 'GraphChatCodexData';
 const STORAGE_SCHEMA_DIRNAME = 'v1';
@@ -2663,6 +2664,15 @@ function registerStorageIpcHandlers(args) {
       return ok();
     } catch (err) {
       return fail(err, 'Failed to delete chat folder.');
+    }
+  });
+
+  ipcMain.handle('storage:sync-conversation-context', async (_event, req) => {
+    try {
+      const result = await syncConversationContext(req);
+      return ok(result);
+    } catch (err) {
+      return fail(err, 'Failed to synchronize conversation context.');
     }
   });
 

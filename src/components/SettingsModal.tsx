@@ -1296,7 +1296,7 @@ export default function SettingsModal(props: Props) {
                       <div className="settingsRow__title">Default working folder</div>
                       <div className="settingsRow__desc">
                         New chats capture this folder when they are created. A chat&apos;s folder is fixed after its
-                        first message is sent.
+                        first node is created.
                       </div>
                       <div className="settingsPathValue">
                         {props.defaultCodexWorkingFolderPath ?? 'Unavailable in this browser session'}

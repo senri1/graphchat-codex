@@ -96,6 +96,7 @@ import {
   putChatMetaRecord,
   putChatStateRecord,
   putWorkspaceSnapshot,
+  syncConversationContext,
 } from './storage/persistence';
 import { getPayload, putPayload } from './storage/payloads';
 import { fontFamilyCss, normalizeFontFamilyKey, type FontFamilyKey } from './ui/typography';
@@ -151,6 +152,43 @@ type ChatRuntimeMeta = {
     importedAt: number;
   } | null;
 };
+
+function normalizeTextNodeStorageRoles(
+  state: WorldEngineChatState,
+  meta: ChatRuntimeMeta,
+): void {
+  const turnNodeIds = new Set<string>();
+  for (const turn of meta.turns ?? []) {
+    if (typeof turn?.userNodeId === 'string' && turn.userNodeId) turnNodeIds.add(turn.userNodeId);
+    if (typeof turn?.assistantNodeId === 'string' && turn.assistantNodeId) turnNodeIds.add(turn.assistantNodeId);
+  }
+  const legacyChat = meta.legacyImport?.source === 'graphchatv1';
+
+  for (const node of state.nodes) {
+    if (node.kind !== 'text') continue;
+    if (legacyChat) {
+      node.isEditNode = undefined;
+      node.documentNode = undefined;
+      node.conversationDraft = undefined;
+      continue;
+    }
+    if (node.documentNode) {
+      node.isEditNode = true;
+      node.conversationDraft = undefined;
+      continue;
+    }
+    if (node.conversationDraft) {
+      node.isEditNode = true;
+      continue;
+    }
+    if (!node.isEditNode) continue;
+    if (turnNodeIds.has(node.id) && node.parentId) {
+      node.isEditNode = undefined;
+      continue;
+    }
+    node.documentNode = true;
+  }
+}
 
 type GenerationJob = {
   chatId: string;
@@ -214,6 +252,7 @@ function resolveCodexSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
   parentNodeId: string | null;
 } {
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
+  if (isEditableDocumentNode(userNode)) return { source: null, parentNodeId: null };
   const parentNodeId = typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
   if (!parentNodeId) return { source: null, parentNodeId: null };
   const parent = nodes.find((node) => node.id === parentNodeId) ?? null;
@@ -223,11 +262,32 @@ function resolveCodexSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
   return { source: normalizeCodexConversationRef(parent.codexRef), parentNodeId };
 }
 
+function isEditableDocumentNode(
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return Boolean(node?.kind === 'text' && node.isEditNode && !node.conversationDraft);
+}
+
 function isLegacyAssistantNode(
   meta: ChatRuntimeMeta,
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
   return Boolean(meta.legacyImport && isLegacyAssistantContinuationNode(node));
+}
+
+function conversationContextDeveloperInstructions(base: string, cwd: string, chatId: string): string {
+  const workingFolder = String(cwd ?? '').replace(/[\\/]+$/, '');
+  const contextPath = `${workingFolder}/conversation-context`;
+  const chatPath = `${contextPath}/chats/${encodeURIComponent(String(chatId ?? '').trim())}`;
+  const guidance = [
+    'GraphChat Codex exposes the complete graph for this chat in the working folder, including nodes outside the current Codex thread history.',
+    `Conversation context root: ${contextPath}`,
+    `Current chat graph: ${chatPath}`,
+    'When a request may depend on previous discussions, notes, or other graph branches, search the current chat node Markdown files. Look in INDEX.md for other chats and consult graph.json when ancestry, branches, or checkpoints matter.',
+    'Files under nodes/documents are editable user documents. Files under nodes/conversation and generated INDEX.md, README.md, and graph.json files are read-only context.',
+  ].join('\n');
+  const trimmedBase = String(base ?? '').trim();
+  return trimmedBase ? `${trimmedBase}\n\n${guidance}` : guidance;
 }
 
 function findCodexWorkingFolderInNodes(nodes: ChatNode[]): string | null {
@@ -2947,6 +3007,7 @@ export default function App() {
   const persistPendingRef = useRef(false);
   const persistForcePendingRef = useRef(false);
   const persistFailureNotifiedRef = useRef(false);
+  const contextSyncFailureNotifiedRef = useRef(false);
   const persistNowRef = useRef<((opts?: { force?: boolean }) => void) | null>(null);
   const hydratingPdfChatsRef = useRef<Set<string>>(new Set());
   const attachmentsGcDirtyRef = useRef(false);
@@ -3099,12 +3160,16 @@ export default function App() {
 
   useEffect(() => {
     const editingId = String(ui.editingNodeId ?? '').trim();
-    if (editingId.startsWith('n')) {
+    if (editingId) {
       contextTargetEditNodeIdRef.current = editingId;
       return;
     }
     const selectedId = String(ui.selectedNodeId ?? '').trim();
-    if (selectedId.startsWith('n')) {
+    const selectedNode =
+      chatStatesRef.current
+        .get(activeChatIdRef.current)
+        ?.nodes.find((node) => node.kind === 'text' && node.id === selectedId) ?? null;
+    if (selectedNode?.kind === 'text' && selectedNode.isEditNode) {
       contextTargetEditNodeIdRef.current = selectedId;
     }
   }, [ui.editingNodeId, ui.selectedNodeId]);
@@ -3750,6 +3815,101 @@ export default function App() {
           failed = true;
         }
 
+        try {
+          const contextChats = chatIds.flatMap((chatId) => {
+            const state = chatStatesRef.current.get(chatId);
+            const meta = chatMetaRef.current.get(chatId);
+            const cwd = String(meta?.codexWorkingFolderPath ?? '').trim();
+            if (!state || !meta || !cwd) return [];
+            const info = findChatNameAndFolderPath(root, chatId);
+            const nodes = state.nodes.map((node) => {
+              const common = {
+                kind: node.kind,
+                id: node.id,
+                title: node.title,
+                parentId: node.parentId,
+                rect: node.rect,
+              };
+              if (node.kind === 'text') {
+                return {
+                  ...common,
+                  author: node.author,
+                  content: node.content,
+                  textFormat: node.textFormat,
+                  isEditNode: Boolean(node.isEditNode),
+                  documentNode: Boolean(node.documentNode),
+                  isGenerating: Boolean(node.isGenerating),
+                  modelId: node.modelId,
+                  codexRef: node.codexRef,
+                  attachments: node.attachments,
+                };
+              }
+              if (node.kind === 'pdf') {
+                return {
+                  ...common,
+                  fileName: node.fileName,
+                  pageCount: node.pageCount,
+                  storageKey: node.storageKey,
+                };
+              }
+              return {
+                ...common,
+                attachments: node.attachments,
+              };
+            });
+            return [
+              {
+                chatId,
+                chatName: info?.name ?? `Chat ${chatId.slice(-4)}`,
+                folderPath: info?.folderPath ?? [],
+                cwd,
+                nodes,
+                meta: { turns: meta.turns, legacyImport: meta.legacyImport },
+              },
+            ];
+          });
+          const contextResult = await syncConversationContext(contextChats);
+          for (const update of contextResult.updates) {
+            const state = chatStatesRef.current.get(update.chatId);
+            const node =
+              state?.nodes.find(
+                (item): item is Extract<ChatNode, { kind: 'text' }> =>
+                  item.kind === 'text' && item.id === update.nodeId && Boolean(item.isEditNode),
+              ) ?? null;
+            if (!state || !node || node.content === update.content) continue;
+            node.content = update.content;
+            if (activeChatIdRef.current === update.chatId) {
+              const activeEngine = engineRef.current;
+              const activeEditingId = String(activeEngine?.getUiState().editingNodeId ?? '').trim();
+              editingDraftByNodeIdRef.current.set(update.nodeId, update.content);
+              if (activeEditingId === update.nodeId) {
+                activeEngine?.setEditingText(update.content);
+                if (activeEngine) setUi(activeEngine.getUiState());
+              } else {
+                activeEngine?.setTextNodeContent(update.nodeId, update.content, { streaming: false });
+              }
+            }
+          }
+          if (contextResult.conflicts.length > 0) {
+            showToast(
+              `A Markdown node changed in both GraphChat and on disk. The on-disk edit was loaded and ${contextResult.conflicts.length} GraphChat cop${contextResult.conflicts.length === 1 ? 'y was' : 'ies were'} preserved in the chat's conflicts folder.`,
+              'info',
+              9000,
+            );
+          }
+          contextSyncFailureNotifiedRef.current = false;
+        } catch (error: any) {
+          console.error('Failed to synchronize conversation context:', error);
+          if (!contextSyncFailureNotifiedRef.current) {
+            contextSyncFailureNotifiedRef.current = true;
+            showToast(
+              error?.message || 'GraphChat saved locally, but its conversation context could not be synchronized.',
+              'error',
+              7200,
+            );
+          }
+        }
+
         for (const chatId of chatIds) {
           const state = chatStatesRef.current.get(chatId);
           if (state) {
@@ -4268,6 +4428,7 @@ export default function App() {
       latexMainFile: null,
       latexActiveFile: null,
       isEditNode: true,
+      documentNode: true,
       llmError: null,
     };
 
@@ -4522,8 +4683,9 @@ export default function App() {
     let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
       const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
-      if (!isLegacyAssistantNode(meta, parentNode)) {
-        const message = 'To continue or branch, reply from a completed Codex or imported GraphChatV1 assistant node.';
+      if (!isLegacyAssistantNode(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+        const message =
+          'To continue or branch, reply from an editable document, a completed Codex response, or an imported GraphChatV1 response.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
         if (activeChatIdRef.current === args.chatId) {
           engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
@@ -4627,7 +4789,11 @@ export default function App() {
         prompt,
         model: codexModel,
         ...(codexEffort ? { effort: codexEffort } : {}),
-        developerInstructions: args.systemInstruction,
+        developerInstructions: conversationContextDeveloperInstructions(
+          args.systemInstruction,
+          workingFolder,
+          args.chatId,
+        ),
         source: sourceResolution.source
           ? {
               threadId: sourceResolution.source.threadId,
@@ -6987,10 +7153,12 @@ export default function App() {
     };
     window.addEventListener('pagehide', requestImmediatePersist);
     window.addEventListener('beforeunload', requestImmediatePersist);
+    window.addEventListener('focus', requestImmediatePersist);
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
       window.removeEventListener('pagehide', requestImmediatePersist);
       window.removeEventListener('beforeunload', requestImmediatePersist);
+      window.removeEventListener('focus', requestImmediatePersist);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, []);
@@ -7074,6 +7242,11 @@ export default function App() {
     const chatStates = payload.chatStates;
     const chatMeta = payload.chatMeta;
     const desiredActive = payload.activeChatId;
+
+    for (const [chatId, state] of chatStates.entries()) {
+      const meta = chatMeta.get(chatId);
+      if (meta) normalizeTextNodeStorageRoles(state, meta);
+    }
 
     setTreeRoot(root);
     setFocusedFolderId(payload.focusedFolderId || root.id);
@@ -8011,7 +8184,6 @@ export default function App() {
 	        const item: WorkspaceChat = { kind: 'chat', id: newChatId, name: res.chatName };
 	        nextRoot = insertItem(nextRoot, ensured.folderId, item);
 
-	        chatStatesRef.current.set(newChatId, res.state);
           const importedMeta = res.meta as ChatRuntimeMeta;
           importedMeta.codexWorkingFolderPath = defaultCodexWorkingFolderPathRef.current;
           const archiveAppName =
@@ -8025,6 +8197,8 @@ export default function App() {
               importedAt: Date.now(),
             };
           }
+          normalizeTextNodeStorageRoles(res.state, importedMeta);
+	        chatStatesRef.current.set(newChatId, res.state);
 	        chatMetaRef.current.set(newChatId, importedMeta);
 	        if (res.backgroundLibraryItem) upsertBackgroundLibraryItem(res.backgroundLibraryItem);
 	        if (res.warnings.length) warnings.push(...res.warnings.map((w) => `${res.chatName}: ${w}`));
@@ -8922,25 +9096,15 @@ export default function App() {
   };
 
   const isChatWorkingFolderLocked = (chatId: string): boolean => {
-    const meta = chatMetaRef.current.get(chatId);
     const state = chatStatesRef.current.get(chatId);
-    const hasCodexNode = Boolean(
-      state?.nodes.some(
-        (node) =>
-          node.kind === 'text' &&
-          (Boolean(normalizeCodexConversationRef(node.codexRef)) ||
-            (node.isGenerating && node.llmTask?.provider === 'codex')),
-      ),
-    );
-    if (hasCodexNode) return true;
-    return Boolean(meta && !meta.legacyImport && Array.isArray(meta.turns) && meta.turns.length > 0);
+    return Boolean(state && state.nodes.length > 0);
   };
 
   const chooseChatWorkingFolder = async (chatId: string) => {
     const id = String(chatId ?? '').trim();
     if (!id) return;
     if (isChatWorkingFolderLocked(id)) {
-      showToast('The working folder is fixed after the first message is sent.', 'info', 5200);
+      showToast('The working folder is fixed after the first node is created.', 'info', 5200);
       return;
     }
     const api = window.gcElectron;
@@ -9234,8 +9398,12 @@ export default function App() {
         parentNode?.kind === 'text' && parentNode.author === 'assistant'
           ? normalizeCodexConversationRef(parentNode.codexRef)
           : null;
-      if (!parentRef && !isLegacyAssistantNode(meta, parentNode)) {
-        showToast('To continue or branch, reply from a completed Codex or imported GraphChatV1 assistant node.', 'error', 5200);
+      if (!parentRef && !isLegacyAssistantNode(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+        showToast(
+          'To continue or branch, reply from an editable document, a completed Codex response, or an imported GraphChatV1 response.',
+          'error',
+          5200,
+        );
         return null;
       }
     }
@@ -9653,7 +9821,7 @@ export default function App() {
     const preSnapshot = engine.exportChatState();
     const leafNode = preSnapshot.nodes.find((n) => n.id === userNodeId) ?? null;
     if (!leafNode) return null;
-    if (leafNode.parentId) {
+    if (leafNode.parentId && !isEditableDocumentNode(leafNode)) {
       const parent = preSnapshot.nodes.find((node) => node.id === leafNode.parentId) ?? null;
       const parentRef =
         parent?.kind === 'text' && parent.author === 'assistant'
@@ -9887,6 +10055,10 @@ export default function App() {
       );
     } catch {
       // ignore
+    }
+
+    if (userNode.conversationDraft) {
+      engine.finalizeConversationDraft(userNodeId);
     }
 
     const res = engine.spawnAssistantTurn({

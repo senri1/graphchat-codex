@@ -35,6 +35,22 @@ export type ElectronStorageApi = {
   storageListAttachmentKeys?: () => Promise<{ ok: boolean; keys?: string[]; error?: string }>;
   storageDeleteAttachments?: (req: { keys: string[] }) => Promise<{ ok: boolean; error?: string }>;
   storageDeleteChatFolder?: (req: { chatId: string }) => Promise<{ ok: boolean; error?: string }>;
+  storageSyncConversationContext?: (req: {
+    chats: Array<{
+      chatId: string;
+      chatName: string;
+      folderPath: string[];
+      cwd: string;
+      nodes: unknown[];
+      meta: unknown;
+    }>;
+  }) => Promise<{
+    ok: boolean;
+    updates?: Array<{ chatId: string; nodeId: string; content: string }>;
+    conflicts?: Array<{ chatId: string; nodeId: string; preservedGraphChatCopy: string }>;
+    roots?: string[];
+    error?: string;
+  }>;
   storageGetDataDirInfo?: () => Promise<{
     ok: boolean;
     path?: string;

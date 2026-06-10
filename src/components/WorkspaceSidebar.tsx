@@ -584,7 +584,7 @@ export default function WorkspaceSidebar(props: Props) {
                       disabled={isChatWorkingFolderLocked(item.id)}
                       title={
                         isChatWorkingFolderLocked(item.id)
-                          ? 'The working folder is fixed after the first message is sent.'
+                          ? 'The working folder is fixed after the first node is created.'
                           : 'Choose the folder Codex can access for this chat.'
                       }
                       onClick={(e) => {

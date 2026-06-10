@@ -375,6 +375,8 @@ type ParentAnchor =
 type TextNode = DemoNodeBase & {
   kind: 'text';
   isEditNode?: boolean;
+  documentNode?: boolean;
+  conversationDraft?: boolean;
   author: ChatAuthor;
   rect: Rect;
   content: string;
@@ -1167,6 +1169,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           ...(n.parentAnchor ? { parentAnchor: { ...n.parentAnchor } } : {}),
           rect: { ...n.rect },
           ...(n.isEditNode ? { isEditNode: true } : {}),
+          ...(n.documentNode ? { documentNode: true } : {}),
+          ...(n.conversationDraft ? { conversationDraft: true } : {}),
           author: n.author,
           content: n.content,
           textFormat: n.textFormat ?? 'markdown',
@@ -1356,7 +1360,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           const next = raw.trim();
           return next ? next : null;
         })();
-        const isEditNode = Boolean((n as any)?.isEditNode) || n.id.startsWith('n');
+        const isEditNode = Boolean((n as any)?.isEditNode);
+        const documentNode = Boolean((n as any)?.documentNode);
+        const conversationDraft = Boolean((n as any)?.conversationDraft);
         const rawAuthor = (n as any)?.author;
         const author: ChatAuthor =
           rawAuthor === 'user' || rawAuthor === 'assistant'
@@ -1502,6 +1508,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           rect: { ...n.rect },
           title: n.title,
           ...(isEditNode ? { isEditNode: true } : {}),
+          ...(documentNode ? { documentNode: true } : {}),
+          ...(conversationDraft ? { conversationDraft: true } : {}),
 	          author,
 	          content,
           textFormat,
@@ -2465,13 +2473,14 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     author?: ChatAuthor;
     rect?: Rect;
     textFormat?: 'markdown' | 'latex';
+    conversationDraft?: boolean;
   }): string {
     const title = typeof opts?.title === 'string' ? opts.title.trim() : '';
     const content = typeof opts?.content === 'string' ? opts.content : String(opts?.content ?? '');
     const author: ChatAuthor = opts?.author === 'assistant' ? 'assistant' : 'user';
     const textFormat: 'markdown' | 'latex' = opts?.textFormat === 'latex' ? 'latex' : 'markdown';
 
-    const id = `n${Date.now().toString(36)}-${(this.nodeSeq++).toString(36)}`;
+    const id = `${opts?.conversationDraft ? 'u' : 'n'}${Date.now().toString(36)}-${(this.nodeSeq++).toString(36)}`;
     const nodeW = 460;
     const nodeH = 240;
     const explicitRect = this.normalizeSpawnRect(opts?.rect);
@@ -2484,6 +2493,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       rect: explicitRect ?? { x: center.x - nodeW * 0.5, y: center.y - nodeH * 0.5, w: nodeW, h: nodeH },
       title: title || 'Text',
       isEditNode: true,
+      ...(!opts?.conversationDraft ? { documentNode: true } : {}),
+      ...(opts?.conversationDraft ? { conversationDraft: true } : {}),
       author,
       content,
       textFormat,
@@ -4941,9 +4952,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private isIntrinsicEditTextNode(node: TextNode): boolean {
-    if (node.isEditNode) return true;
-    // Back-compat: notes created before we tagged them use an `n...` id prefix.
-    return typeof node.id === 'string' && node.id.startsWith('n');
+    return Boolean(node.isEditNode || node.documentNode || node.conversationDraft);
   }
 
   private canEditTextNode(node: TextNode): boolean {
@@ -5045,6 +5054,22 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 	    this.textRasterGeneration += 1;
 	    this.requestRender();
 	    this.requestPersist();
+  }
+
+  finalizeConversationDraft(nodeId: string): void {
+    const id = typeof nodeId === 'string' ? nodeId.trim() : '';
+    if (!id) return;
+    const node = this.nodes.find((item): item is TextNode => item.kind === 'text' && item.id === id) ?? null;
+    if (!node?.conversationDraft) return;
+    node.conversationDraft = undefined;
+    node.isEditNode = undefined;
+    if (this.editingNodeId === id) {
+      this.editingNodeId = null;
+      this.editingOriginalContent = null;
+    }
+    this.requestRender();
+    this.emitUiState();
+    this.requestPersist();
   }
 
   setTextNodeContent(nodeId: string, next: string, opts?: { streaming?: boolean }): void {
@@ -9858,7 +9883,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         ? { x: world.x, y: world.y, w: 420, h: 280 }
         : { x: world.x, y: world.y, w: 460, h: 240 };
       const createdId =
-        kind === 'ink' ? this.spawnInkNode({ rect }) : this.spawnTextNode({ title: 'User', author: 'user', rect });
+        kind === 'ink'
+          ? this.spawnInkNode({ rect })
+          : this.spawnTextNode({ title: 'User', author: 'user', rect, conversationDraft: true });
       const created = this.nodes.find((n) => n.id === createdId) ?? null;
       if (created) {
         created.parentId = node.id;

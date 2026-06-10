@@ -82,6 +82,21 @@ export type PersistedChatMetaRecord = {
   updatedAt: number;
 };
 
+export type ConversationContextSyncChat = {
+  chatId: string;
+  chatName: string;
+  folderPath: string[];
+  cwd: string;
+  nodes: unknown[];
+  meta: unknown;
+};
+
+export type ConversationContextSyncResult = {
+  updates: Array<{ chatId: string; nodeId: string; content: string }>;
+  conflicts: Array<{ chatId: string; nodeId: string; preservedGraphChatCopy: string }>;
+  roots: string[];
+};
+
 function requestToPromise<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
@@ -249,4 +264,20 @@ export async function deleteChatStorageFolder(chatId: string): Promise<void> {
   }
   const res = await rawApi.storageDeleteChatFolder({ chatId });
   if (!res?.ok) throw new Error(res?.error || 'Failed to delete chat folder.');
+}
+
+export async function syncConversationContext(
+  chats: ConversationContextSyncChat[],
+): Promise<ConversationContextSyncResult> {
+  const electron = getElectronStorageApi();
+  if (!electron?.storageSyncConversationContext) {
+    return { updates: [], conflicts: [], roots: [] };
+  }
+  const res = await electron.storageSyncConversationContext({ chats });
+  if (!res?.ok) throw new Error(res?.error || 'Failed to synchronize conversation context.');
+  return {
+    updates: Array.isArray(res.updates) ? res.updates : [],
+    conflicts: Array.isArray(res.conflicts) ? res.conflicts : [],
+    roots: Array.isArray(res.roots) ? res.roots : [],
+  };
 }
