@@ -74,7 +74,7 @@ import {
 import { buildGeminiContext, type GeminiChatSettings } from './llm/gemini';
 import { buildXaiResponseRequest, type XaiChatSettings } from './llm/xai';
 import { buildAnthropicMessageRequest, type AnthropicChatSettings } from './llm/anthropic';
-import { DEFAULT_MODEL_ID, getModelInfo, listModels } from './llm/registry';
+import { DEFAULT_MODEL_ID, getModelInfo, listModels, type ModelInfo } from './llm/registry';
 import {
   DEFAULT_SYSTEM_INSTRUCTIONS,
   normalizeSystemInstruction,
@@ -108,6 +108,12 @@ import {
   type CodexThreadDetail,
   type CodexThreadSummary,
 } from './codex/threadImport';
+import { buildLegacyHistory, type CodexInjectedMessage } from './codex/legacyHistory';
+import {
+  buildCodexComposerModels,
+  resolveCodexComposerModelId,
+  type CodexRuntimeModel,
+} from './codex/models';
 
 type ChatTurnMeta = {
   id: string;
@@ -135,6 +141,11 @@ type ChatRuntimeMeta = {
   codexWorkingFolderPath: string | null;
   codexImportedThreadId?: string | null;
   codexImportedUpdatedAt?: number | null;
+  legacyImport?: {
+    source: 'graphchatv1';
+    sourceChatId?: string;
+    importedAt: number;
+  } | null;
 };
 
 type GenerationJob = {
@@ -206,6 +217,13 @@ function resolveCodexSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
     return { source: null, parentNodeId };
   }
   return { source: normalizeCodexConversationRef(parent.codexRef), parentNodeId };
+}
+
+function isLegacyAssistantNode(
+  meta: ChatRuntimeMeta,
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return Boolean(meta.legacyImport && node?.kind === 'text' && node.author === 'assistant');
 }
 
 function findCodexWorkingFolderInNodes(nodes: ChatNode[]): string | null {
@@ -3123,10 +3141,10 @@ export default function App() {
   const modelUserSettingsRef = useRef<ModelUserSettingsById>(modelUserSettings);
   const [globalSystemInstruction, setGlobalSystemInstruction] = useState<string>(() => DEFAULT_SYSTEM_INSTRUCTIONS);
   const globalSystemInstructionRef = useRef<string>(globalSystemInstruction);
-  const composerModelOptions = useMemo(
-    () => allModels.filter((m) => m.provider === 'openai' && modelUserSettings[m.id]?.includeInComposer !== false),
-    [allModels, modelUserSettings],
-  );
+  const [composerModelOptions, setComposerModelOptions] = useState<ModelInfo[]>([]);
+  const composerModelOptionsRef = useRef<ModelInfo[]>([]);
+  const [defaultCodexComposerModelId, setDefaultCodexComposerModelId] = useState<string | null>(null);
+  const defaultCodexComposerModelIdRef = useRef<string | null>(null);
 
   const toastTimerRef = useRef<number | null>(null);
   const toastIdRef = useRef(0);
@@ -3820,6 +3838,59 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const api = window.gcElectron;
+    if (!api?.codexModelList) return;
+    let cancelled = false;
+
+    void api
+      .codexModelList()
+      .then((response) => {
+        if (cancelled) return;
+        if (!response?.ok) throw new Error(response?.error || 'Failed to list Codex models.');
+        const runtimeModels = Array.isArray(response.result?.data)
+          ? (response.result.data as CodexRuntimeModel[])
+          : [];
+        const built = buildCodexComposerModels(runtimeModels, allModels);
+        if (!built.models.length || !built.defaultModelId) {
+          throw new Error('Codex did not report any supported models.');
+        }
+        composerModelOptionsRef.current = built.models;
+        defaultCodexComposerModelIdRef.current = built.defaultModelId;
+        setComposerModelOptions(built.models);
+        setDefaultCodexComposerModelId(built.defaultModelId);
+      })
+      .catch((error: any) => {
+        if (cancelled) return;
+        showToast(error?.message || 'Failed to load Codex models.', 'error', 6200);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [allModels]);
+
+  useEffect(() => {
+    if (!composerModelOptions.length || !defaultCodexComposerModelId) return;
+    const meta = chatMetaRef.current.get(activeChatId);
+    const requested = meta?.llm.modelId || composerModelId;
+    const resolved = resolveCodexComposerModelId(
+      requested,
+      composerModelOptions,
+      defaultCodexComposerModelId,
+    );
+    if (!resolved || (resolved === composerModelId && (!meta || meta.llm.modelId === resolved))) return;
+    setComposerModelId(resolved);
+    if (meta) meta.llm.modelId = resolved;
+    schedulePersistSoon();
+  }, [
+    activeChatId,
+    composerModelId,
+    composerModelOptions,
+    defaultCodexComposerModelId,
+    schedulePersistSoon,
+  ]);
+
+  useEffect(() => {
     // Editor overlays and raw viewers follow camera movement with their own RAF loops;
     // keep the debug bridge off unless HUD/menus need React-driven repositioning.
     const shouldReceiveDebugFrames =
@@ -4431,7 +4502,8 @@ export default function App() {
       return;
     }
 
-    const workingFolder = String(ensureChatMeta(args.chatId).codexWorkingFolderPath ?? '').trim();
+    const meta = ensureChatMeta(args.chatId);
+    const workingFolder = String(meta.codexWorkingFolderPath ?? '').trim();
     if (!workingFolder) {
       const message = 'Choose a Codex working folder for this chat before sending.';
       updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
@@ -4443,14 +4515,38 @@ export default function App() {
     }
 
     const sourceResolution = resolveCodexSourceForUserNode(state.nodes, args.userNodeId);
+    let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
-      const message = 'To continue or branch, reply from a completed Codex assistant node.';
-      updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
-      if (activeChatIdRef.current === args.chatId) {
-        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+      const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
+      if (!isLegacyAssistantNode(meta, parentNode)) {
+        const message = 'To continue or branch, reply from a completed Codex or imported GraphChatV1 assistant node.';
+        updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
+        if (activeChatIdRef.current === args.chatId) {
+          engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        }
+        showToast(message, 'error', 5200);
+        return;
       }
-      showToast(message, 'error', 5200);
-      return;
+      try {
+        legacyHistory = buildLegacyHistory(state.nodes, parentNode.id);
+      } catch (error: any) {
+        const message = error?.message || 'Failed to build the imported GraphChatV1 branch history.';
+        updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
+        if (activeChatIdRef.current === args.chatId) {
+          engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        }
+        showToast(message, 'error', 6200);
+        return;
+      }
+      if (!legacyHistory.length) {
+        const message = 'The selected imported branch does not contain any text history.';
+        updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
+        if (activeChatIdRef.current === args.chatId) {
+          engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        }
+        showToast(message, 'error', 5200);
+        return;
+      }
     }
     if (sourceResolution.source && sourceResolution.source.cwd !== workingFolder) {
       const message =
@@ -4463,9 +4559,9 @@ export default function App() {
       return;
     }
 
-    const modelInfo = getModelInfo(args.modelId);
-    if (!modelInfo || modelInfo.provider !== 'openai') {
-      const message = 'Select an OpenAI model for the Codex runtime.';
+    const modelInfo = composerModelOptionsRef.current.find((model) => model.id === args.modelId) ?? null;
+    if (!modelInfo) {
+      const message = 'Select a model currently supported by the Codex runtime.';
       updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
       if (activeChatIdRef.current === args.chatId) {
         engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
@@ -4534,6 +4630,7 @@ export default function App() {
               turnId: sourceResolution.source.turnId,
             }
           : null,
+        ...(legacyHistory.length ? { legacyHistory } : {}),
       });
       if (job.closed) return;
       if (!response?.ok || !response.result) {
@@ -6947,7 +7044,15 @@ export default function App() {
     } else {
       setReplyContextAttachments([]);
     }
-    setComposerModelId(meta.llm.modelId || DEFAULT_MODEL_ID);
+    setComposerModelId(
+      resolveCodexComposerModelId(
+        meta.llm.modelId,
+        composerModelOptionsRef.current,
+        defaultCodexComposerModelIdRef.current,
+      ) ??
+        meta.llm.modelId ??
+        DEFAULT_MODEL_ID,
+    );
     setComposerWebSearch(Boolean(meta.llm.webSearchEnabled));
     setActiveChatSystemInstructionOverride(
       typeof meta.systemInstructionOverride === 'string' ? meta.systemInstructionOverride : null,
@@ -7147,7 +7252,15 @@ export default function App() {
     } else {
       setReplyContextAttachments([]);
     }
-    setComposerModelId(meta.llm.modelId || DEFAULT_MODEL_ID);
+    setComposerModelId(
+      resolveCodexComposerModelId(
+        meta.llm.modelId,
+        composerModelOptionsRef.current,
+        defaultCodexComposerModelIdRef.current,
+      ) ??
+        meta.llm.modelId ??
+        DEFAULT_MODEL_ID,
+    );
 	    setComposerWebSearch(Boolean(meta.llm.webSearchEnabled));
     setActiveChatSystemInstructionOverride(
       typeof meta.systemInstructionOverride === 'string' ? meta.systemInstructionOverride : null,
@@ -7323,6 +7436,18 @@ export default function App() {
             codexImportedUpdatedAt: Number.isFinite(Number(raw?.codexImportedUpdatedAt))
               ? Number(raw.codexImportedUpdatedAt)
               : null,
+            legacyImport:
+              raw?.legacyImport?.source === 'graphchatv1'
+                ? {
+                    source: 'graphchatv1',
+                    ...(typeof raw.legacyImport.sourceChatId === 'string' && raw.legacyImport.sourceChatId.trim()
+                      ? { sourceChatId: raw.legacyImport.sourceChatId.trim() }
+                      : {}),
+                    importedAt: Number.isFinite(Number(raw.legacyImport.importedAt))
+                      ? Number(raw.legacyImport.importedAt)
+                      : Date.now(),
+                  }
+                : null,
           };
           chatMeta.set(chatId, meta);
         } catch {
@@ -7885,6 +8010,17 @@ export default function App() {
 	        chatStatesRef.current.set(newChatId, res.state);
           const importedMeta = res.meta as ChatRuntimeMeta;
           importedMeta.codexWorkingFolderPath = defaultCodexWorkingFolderPathRef.current;
+          const archiveAppName =
+            typeof (archiveObj as any)?.app?.name === 'string'
+              ? String((archiveObj as any).app.name).trim().toLowerCase()
+              : '';
+          if (archiveAppName !== 'graphchat-codex') {
+            importedMeta.legacyImport = {
+              source: 'graphchatv1',
+              sourceChatId: String((chat as any)?.id ?? '').trim() || undefined,
+              importedAt: Date.now(),
+            };
+          }
 	        chatMetaRef.current.set(newChatId, importedMeta);
 	        if (res.backgroundLibraryItem) upsertBackgroundLibraryItem(res.backgroundLibraryItem);
 	        if (res.warnings.length) warnings.push(...res.warnings.map((w) => `${res.chatName}: ${w}`));
@@ -8783,7 +8919,17 @@ export default function App() {
 
   const isChatWorkingFolderLocked = (chatId: string): boolean => {
     const meta = chatMetaRef.current.get(chatId);
-    return Boolean(meta && Array.isArray(meta.turns) && meta.turns.length > 0);
+    const state = chatStatesRef.current.get(chatId);
+    const hasCodexNode = Boolean(
+      state?.nodes.some(
+        (node) =>
+          node.kind === 'text' &&
+          (Boolean(normalizeCodexConversationRef(node.codexRef)) ||
+            (node.isGenerating && node.llmTask?.provider === 'codex')),
+      ),
+    );
+    if (hasCodexNode) return true;
+    return Boolean(meta && !meta.legacyImport && Array.isArray(meta.turns) && meta.turns.length > 0);
   };
 
   const chooseChatWorkingFolder = async (chatId: string) => {
@@ -9084,8 +9230,8 @@ export default function App() {
         parentNode?.kind === 'text' && parentNode.author === 'assistant'
           ? normalizeCodexConversationRef(parentNode.codexRef)
           : null;
-      if (!parentRef) {
-        showToast('To continue or branch, reply from a completed Codex assistant node.', 'error', 5200);
+      if (!parentRef && !isLegacyAssistantNode(meta, parentNode)) {
+        showToast('To continue or branch, reply from a completed Codex or imported GraphChatV1 assistant node.', 'error', 5200);
         return null;
       }
     }
@@ -9509,8 +9655,12 @@ export default function App() {
         parent?.kind === 'text' && parent.author === 'assistant'
           ? normalizeCodexConversationRef(parent.codexRef)
           : null;
-      if (!parentRef) {
-        showToast('To continue or branch, send from a user node attached to a completed Codex response.', 'error', 5200);
+      if (!parentRef && !isLegacyAssistantNode(meta, parent)) {
+        showToast(
+          'To continue or branch, send from a user node attached to a completed Codex or imported GraphChatV1 response.',
+          'error',
+          5200,
+        );
         return null;
       }
     }
@@ -9888,11 +10038,20 @@ export default function App() {
 
   const applyComposerModelSelection = React.useCallback(
     (nextModelId: string) => {
-      const value = String(nextModelId || DEFAULT_MODEL_ID).trim() || DEFAULT_MODEL_ID;
+      const value = resolveCodexComposerModelId(
+        nextModelId,
+        composerModelOptionsRef.current,
+        defaultCodexComposerModelIdRef.current,
+      );
+      if (!value) {
+        showToast('Codex models are still loading.', 'error', 4200);
+        return;
+      }
       setComposerModelId(value);
       ensureChatMeta(activeChatIdRef.current).llm.modelId = value;
+      schedulePersistSoon();
     },
-    [ensureChatMeta],
+    [ensureChatMeta, schedulePersistSoon],
   );
 
   const clearEditNodeSendModelPreview = React.useCallback(() => {
@@ -11399,7 +11558,22 @@ export default function App() {
           isThreadLinked={isCodexThreadLinked}
           onOpenThread={openCodexThread}
         />
-        <CodexDiagnosticsModal open={codexDiagnosticsOpen} onClose={() => setCodexDiagnosticsOpen(false)} />
+        <CodexDiagnosticsModal
+          open={codexDiagnosticsOpen}
+          onClose={() => setCodexDiagnosticsOpen(false)}
+          selectedModelId={
+            composerModelOptions.find((model) => model.id === composerModelId)?.apiModel ?? null
+          }
+          selectedReasoningEffort={
+            composerModelOptions.find((model) => model.id === composerModelId)?.effort ?? null
+          }
+          onSelectionChange={(modelId, reasoningEffort) => {
+            const selected = composerModelOptionsRef.current.find(
+              (model) => model.apiModel === modelId && (model.effort ?? '') === reasoningEffort,
+            );
+            if (selected) applyComposerModelSelection(selected.id);
+          }}
+        />
         <SettingsModal
           open={settingsOpen}
           activePanel={settingsPanel}

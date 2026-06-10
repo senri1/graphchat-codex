@@ -56,14 +56,23 @@ interface Window {
       effort?: string;
       developerInstructions?: string;
       source?: { threadId: string; turnId: string } | null;
+      legacyHistory?: Array<{
+        type: 'message';
+        role: 'user' | 'assistant';
+        content: Array<{
+          type: 'input_text' | 'output_text';
+          text: string;
+        }>;
+      }>;
     }) => Promise<{
       ok: boolean;
       result?: {
         clientTag: string;
         threadId: string;
         turnId: string;
-        mode: 'new' | 'continue' | 'fork';
+        mode: 'new' | 'continue' | 'fork' | 'legacy';
         rolledBackTurns: number;
+        injectedItemCount?: number;
         forkedFromThreadId?: string | null;
       };
       error?: string;

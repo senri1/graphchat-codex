@@ -27,6 +27,9 @@ type PendingServerRequest = {
 type Props = {
   open: boolean;
   onClose: () => void;
+  selectedModelId?: string | null;
+  selectedReasoningEffort?: string | null;
+  onSelectionChange?: (modelId: string, reasoningEffort: string) => void;
 };
 
 function errorText(value: unknown, fallback: string): string {
@@ -47,7 +50,13 @@ function percentLabel(window: any): string {
   return `${remaining}% remaining${suffix}`;
 }
 
-export default function CodexDiagnosticsModal({ open, onClose }: Props) {
+export default function CodexDiagnosticsModal({
+  open,
+  onClose,
+  selectedModelId,
+  selectedReasoningEffort,
+  onSelectionChange,
+}: Props) {
   const api = window.gcElectron;
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [account, setAccount] = useState<any>(null);
@@ -96,8 +105,13 @@ export default function CodexDiagnosticsModal({ open, onClose }: Props) {
     if (!response?.ok) throw new Error(errorText(response, 'Failed to list models.'));
     const nextModels = Array.isArray(response.result?.data) ? response.result.data : [];
     setModels(nextModels);
-    setSelectedModel((current) => current || nextModels.find((item: CodexModel) => item.isDefault)?.id || nextModels[0]?.id || '');
-  }, [api]);
+    setSelectedModel((current) => {
+      const preferred = String(selectedModelId ?? '').trim();
+      if (preferred && nextModels.some((item: CodexModel) => item.id === preferred)) return preferred;
+      if (current && nextModels.some((item: CodexModel) => item.id === current)) return current;
+      return nextModels.find((item: CodexModel) => item.isDefault)?.id || nextModels[0]?.id || '';
+    });
+  }, [api, selectedModelId]);
 
   const connectAndRefresh = useCallback(async () => {
     if (!api?.codexStart) {
@@ -179,9 +193,14 @@ export default function CodexDiagnosticsModal({ open, onClose }: Props) {
   useEffect(() => {
     const model = models.find((item) => item.id === selectedModel);
     const supported = Array.isArray(model?.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+    const preferred = String(selectedReasoningEffort ?? '').trim();
+    if (preferred && supported.some((item) => item.reasoningEffort === preferred)) {
+      if (preferred !== selectedEffort) setSelectedEffort(preferred);
+      return;
+    }
     if (supported.some((item) => item.reasoningEffort === selectedEffort)) return;
     setSelectedEffort(model?.defaultReasoningEffort || supported[0]?.reasoningEffort || '');
-  }, [models, selectedEffort, selectedModel]);
+  }, [models, selectedEffort, selectedModel, selectedReasoningEffort]);
 
   if (!open) return null;
 
@@ -359,7 +378,21 @@ export default function CodexDiagnosticsModal({ open, onClose }: Props) {
           <div className="codexDiag__fields">
             <label>
               <span>Model</span>
-              <select value={selectedModel} onChange={(event) => setSelectedModel(event.currentTarget.value)}>
+              <select
+                value={selectedModel}
+                onChange={(event) => {
+                  const nextModelId = event.currentTarget.value;
+                  const nextModel = models.find((item) => item.id === nextModelId);
+                  const supported = Array.isArray(nextModel?.supportedReasoningEfforts)
+                    ? nextModel.supportedReasoningEfforts
+                    : [];
+                  const nextEffort =
+                    nextModel?.defaultReasoningEffort || supported[0]?.reasoningEffort || '';
+                  setSelectedModel(nextModelId);
+                  setSelectedEffort(nextEffort);
+                  onSelectionChange?.(nextModelId, nextEffort);
+                }}
+              >
                 {models.map((model) => (
                   <option key={model.id} value={model.id}>{model.displayName || model.id}</option>
                 ))}
@@ -367,7 +400,14 @@ export default function CodexDiagnosticsModal({ open, onClose }: Props) {
             </label>
             <label>
               <span>Reasoning effort</span>
-              <select value={selectedEffort} onChange={(event) => setSelectedEffort(event.currentTarget.value)}>
+              <select
+                value={selectedEffort}
+                onChange={(event) => {
+                  const nextEffort = event.currentTarget.value;
+                  setSelectedEffort(nextEffort);
+                  onSelectionChange?.(selectedModel, nextEffort);
+                }}
+              >
                 {efforts.map((effort) => (
                   <option key={effort.reasoningEffort} value={effort.reasoningEffort}>{effort.reasoningEffort}</option>
                 ))}

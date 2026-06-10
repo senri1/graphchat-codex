@@ -9,6 +9,33 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
 }
 
+function normalizeInjectedHistory(value) {
+  if (!Array.isArray(value)) return [];
+  if (value.length > 2_000) throw new Error('Legacy history contains too many messages.');
+
+  const out = [];
+  let totalChars = 0;
+  for (const item of value) {
+    if (!item || item.type !== 'message') throw new Error('Legacy history contains an unsupported item.');
+    const role = item.role === 'user' || item.role === 'assistant' ? item.role : null;
+    if (!role) throw new Error('Legacy history contains an unsupported message role.');
+
+    const expectedType = role === 'user' ? 'input_text' : 'output_text';
+    const parts = [];
+    for (const content of Array.isArray(item.content) ? item.content : []) {
+      if (!content || content.type !== expectedType || typeof content.text !== 'string') {
+        throw new Error('Legacy history contains unsupported message content.');
+      }
+      if (!content.text.trim()) continue;
+      totalChars += content.text.length;
+      if (totalChars > 10_000_000) throw new Error('Legacy history is too large to inject.');
+      parts.push({ type: expectedType, text: content.text });
+    }
+    if (parts.length) out.push({ type: 'message', role, content: parts });
+  }
+  return out;
+}
+
 function executableNames() {
   return process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex'] : ['codex'];
 }
@@ -175,11 +202,15 @@ class CodexProcessManager extends EventEmitter {
     const developerInstructions = cleanString(args?.developerInstructions) || null;
     const sourceThreadId = cleanString(args?.source?.threadId);
     const sourceTurnId = cleanString(args?.source?.turnId);
+    const legacyHistory = normalizeInjectedHistory(args?.legacyHistory);
 
     if (!clientTag) throw new Error('Graph turn client tag is required.');
     if (!cwd) throw new Error('Select a Codex working folder before sending.');
     if (!prompt) throw new Error('A text prompt is required.');
     if (!model) throw new Error('A Codex model is required.');
+    if (legacyHistory.length && (sourceThreadId || sourceTurnId)) {
+      throw new Error('Legacy history cannot be combined with a native Codex source turn.');
+    }
 
     const stat = await fs.stat(cwd).catch(() => null);
     if (!stat?.isDirectory()) throw new Error(`Codex working folder is unavailable: ${cwd}`);
@@ -196,6 +227,7 @@ class CodexProcessManager extends EventEmitter {
     let forkedFromThreadId = null;
     let mode = 'new';
     let rolledBackTurns = 0;
+    let injectedItemCount = 0;
 
     if (sourceThreadId || sourceTurnId) {
       if (!sourceThreadId || !sourceTurnId) {
@@ -252,6 +284,20 @@ class CodexProcessManager extends EventEmitter {
       const started = await this.request('thread/start', threadOptions, { timeoutMs: 60_000 });
       threadId = cleanString(started?.thread?.id);
       if (!threadId) throw new Error('Codex did not return a thread id.');
+      if (legacyHistory.length) {
+        try {
+          await this.request(
+            'thread/inject_items',
+            { threadId, items: legacyHistory },
+            { timeoutMs: 60_000 },
+          );
+        } catch (error) {
+          await this.request('thread/archive', { threadId }, { timeoutMs: 15_000 }).catch(() => {});
+          throw error;
+        }
+        injectedItemCount = legacyHistory.length;
+        mode = 'legacy';
+      }
     }
 
     this.pendingGraphStarts += 1;
@@ -283,6 +329,7 @@ class CodexProcessManager extends EventEmitter {
         turnId,
         mode,
         rolledBackTurns,
+        injectedItemCount,
         forkedFromThreadId,
       };
     } finally {
