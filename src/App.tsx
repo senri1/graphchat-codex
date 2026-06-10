@@ -108,7 +108,11 @@ import {
   type CodexThreadDetail,
   type CodexThreadSummary,
 } from './codex/threadImport';
-import { buildLegacyHistory, type CodexInjectedMessage } from './codex/legacyHistory';
+import {
+  buildLegacyHistory,
+  isLegacyAssistantContinuationNode,
+  type CodexInjectedMessage,
+} from './codex/legacyHistory';
 import {
   buildCodexComposerModels,
   resolveCodexComposerModelId,
@@ -223,7 +227,7 @@ function isLegacyAssistantNode(
   meta: ChatRuntimeMeta,
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
-  return Boolean(meta.legacyImport && node?.kind === 'text' && node.author === 'assistant');
+  return Boolean(meta.legacyImport && isLegacyAssistantContinuationNode(node));
 }
 
 function findCodexWorkingFolderInNodes(nodes: ChatNode[]): string | null {

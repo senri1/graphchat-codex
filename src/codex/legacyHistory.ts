@@ -32,6 +32,19 @@ function visibleTextForNode(node: Extract<ChatNode, { kind: 'text' }>): string {
   return parts.join('\n\n');
 }
 
+export function isLegacyAssistantContinuationNode(
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return Boolean(
+    node?.kind === 'text' &&
+      node.author === 'assistant' &&
+      !node.isGenerating &&
+      !node.llmError &&
+      typeof node.content === 'string' &&
+      node.content.trim(),
+  );
+}
+
 export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexInjectedMessage[] {
   const endId = clean(endNodeId);
   if (!endId) throw new Error('Legacy history endpoint is missing.');
@@ -54,6 +67,9 @@ export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexI
   const history: CodexInjectedMessage[] = [];
   for (const node of reversedPath.reverse()) {
     if (node.kind !== 'text') continue;
+    if (node.author === 'assistant' && node.llmError) {
+      throw new Error('The selected imported branch contains a failed assistant response.');
+    }
     const text = visibleTextForNode(node);
     if (!text) continue;
 

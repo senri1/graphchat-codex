@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChatNode } from '../model/chat';
-import { buildLegacyHistory } from './legacyHistory.ts';
+import { buildLegacyHistory, isLegacyAssistantContinuationNode } from './legacyHistory.ts';
 
 function textNode(args: {
   id: string;
@@ -9,7 +9,7 @@ function textNode(args: {
   author: 'user' | 'assistant';
   content: string;
   userPreface?: { replyTo?: string; contexts?: string[] };
-}): ChatNode {
+}): Extract<ChatNode, { kind: 'text' }> {
   return {
     kind: 'text',
     id: args.id,
@@ -99,4 +99,21 @@ test('rejects broken or cyclic ancestry', () => {
     textNode({ id: 'a1', parentId: 'u1', author: 'assistant', content: 'Hello' }),
   ];
   assert.throws(() => buildLegacyHistory(cycle, 'a1'), /parent cycle/);
+});
+
+test('does not allow failed assistant responses as legacy continuation points', () => {
+  const failed = textNode({
+    id: 'a1',
+    parentId: 'u1',
+    author: 'assistant',
+    content: 'Error: unsupported model',
+  });
+  failed.llmError = 'unsupported model';
+  const nodes = [
+    textNode({ id: 'u1', author: 'user', content: 'Hello' }),
+    failed,
+  ];
+
+  assert.equal(isLegacyAssistantContinuationNode(failed), false);
+  assert.throws(() => buildLegacyHistory(nodes, failed.id), /failed assistant response/);
 });

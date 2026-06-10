@@ -54,13 +54,54 @@ function findFolder(item, name) {
   return null;
 }
 
+function mergeStateNodes(primaryStateRecord, additionalStateRecord) {
+  if (!additionalStateRecord) return { stateRecord: primaryStateRecord, addedNodeCount: 0 };
+  const next = structuredClone(primaryStateRecord);
+  const nodes = Array.isArray(next?.state?.nodes) ? next.state.nodes : [];
+  const additionalNodes = Array.isArray(additionalStateRecord?.state?.nodes)
+    ? additionalStateRecord.state.nodes
+    : [];
+  const existingIds = new Set(nodes.map((node) => String(node?.id || '')).filter(Boolean));
+  let addedNodeCount = 0;
+  for (const node of additionalNodes) {
+    const id = String(node?.id || '').trim();
+    if (!id || existingIds.has(id)) continue;
+    nodes.push(structuredClone(node));
+    existingIds.add(id);
+    addedNodeCount += 1;
+  }
+  return { stateRecord: next, addedNodeCount };
+}
+
 function stripProviderData(stateRecord, nextChatId, now) {
   const next = structuredClone(stateRecord);
   next.chatId = nextChatId;
   next.updatedAt = now;
   const nodes = Array.isArray(next?.state?.nodes) ? next.state.nodes : [];
+  const nodeById = new Map(nodes.map((node) => [String(node?.id || ''), node]));
+  const removedNodeIds = new Set(
+    nodes
+      .filter((node) => node?.kind === 'pdf')
+      .map((node) => String(node?.id || ''))
+      .filter(Boolean),
+  );
+  const resolveKeptParentId = (parentId) => {
+    let currentId = typeof parentId === 'string' ? parentId : null;
+    const seen = new Set();
+    while (currentId && removedNodeIds.has(currentId)) {
+      if (seen.has(currentId)) return null;
+      seen.add(currentId);
+      const parent = nodeById.get(currentId);
+      currentId = typeof parent?.parentId === 'string' ? parent.parentId : null;
+    }
+    return currentId;
+  };
+  let droppedAttachmentCount = 0;
   for (const node of nodes) {
     if (!node || typeof node !== 'object') continue;
+    droppedAttachmentCount += Array.isArray(node.attachments) ? node.attachments.length : 0;
+    node.parentId = resolveKeptParentId(node.parentId);
+    node.attachments = [];
     delete node.apiRequest;
     delete node.apiRequestKey;
     delete node.apiResponse;
@@ -68,9 +109,23 @@ function stripProviderData(stateRecord, nextChatId, now) {
     delete node.canonicalMeta;
     delete node.thinkingSummary;
     delete node.llmTask;
+    delete node.latexCompiledAt;
+    delete node.latexCompileLog;
+    delete node.latexCompileError;
     node.isGenerating = false;
   }
-  return next;
+  next.state.nodes = nodes.filter((node) => !removedNodeIds.has(String(node?.id || '')));
+  return {
+    stateRecord: next,
+    droppedAttachmentCount,
+    droppedNodeCount: removedNodeIds.size,
+  };
+}
+
+function stateContainsNode(stateRecord, nodeId) {
+  const id = String(nodeId || '').trim();
+  if (!id) return false;
+  return Boolean(stateRecord?.state?.nodes?.some((node) => node?.id === id));
 }
 
 async function copyBackground(args) {
@@ -112,6 +167,7 @@ async function main() {
       path.join(home, 'Library', 'Application Support', 'GraphChat Codex', 'GraphChatCodexData', 'v1'),
     ),
   );
+  const mergeStateChatId = argValue('merge-state-chat-id');
 
   const sourceWorkspacePath = path.join(sourceRoot, 'Workspace', 'workspace.json');
   const destinationWorkspacePath = path.join(destinationRoot, 'Workspace', 'workspace.json');
@@ -141,9 +197,12 @@ async function main() {
 
   const sourceStatePath = path.join(sourceRoot, 'Chats', encodeURIComponent(chatId), 'state.json');
   const sourceMetaPath = path.join(sourceRoot, 'Chats', encodeURIComponent(chatId), 'meta.json');
-  const [sourceStateRecord, sourceMetaRecord] = await Promise.all([
+  const [sourceStateRecord, sourceMetaRecord, additionalStateRecord] = await Promise.all([
     readJson(sourceStatePath),
     readJson(sourceMetaPath),
+    mergeStateChatId
+      ? readJson(path.join(sourceRoot, 'Chats', encodeURIComponent(mergeStateChatId), 'state.json'))
+      : Promise.resolve(null),
   ]);
 
   const backupRoot = path.join(
@@ -157,14 +216,33 @@ async function main() {
   const now = Date.now();
   const nextChatId = `chat_${crypto.randomUUID()}`;
   const destinationChatRoot = path.join(destinationRoot, 'Chats', encodeURIComponent(nextChatId));
-  const nextStateRecord = stripProviderData(sourceStateRecord, nextChatId, now);
+  const merged = mergeStateNodes(sourceStateRecord, additionalStateRecord);
+  const stripped = stripProviderData(merged.stateRecord, nextChatId, now);
+  const nextStateRecord = stripped.stateRecord;
   const nextMetaRecord = structuredClone(sourceMetaRecord);
   nextMetaRecord.chatId = nextChatId;
   nextMetaRecord.updatedAt = now;
   nextMetaRecord.meta = nextMetaRecord.meta && typeof nextMetaRecord.meta === 'object' ? nextMetaRecord.meta : {};
-  nextMetaRecord.meta.codexWorkingFolderPath =
+  const workingFolderPath =
+    argValue('cwd') ||
     String(destinationWorkspace?.codex?.defaultWorkingFolderPath || '').trim() ||
     path.join(home, '.graphchat-codex', 'threads');
+  const workingFolderStat = await fs.stat(workingFolderPath).catch(() => null);
+  if (!workingFolderStat?.isDirectory()) {
+    throw new Error(`Codex working folder is unavailable: ${workingFolderPath}`);
+  }
+  nextMetaRecord.meta.codexWorkingFolderPath = workingFolderPath;
+  nextMetaRecord.meta.draftAttachments = [];
+  nextMetaRecord.meta.selectedAttachmentKeys = [];
+  if (!stateContainsNode(nextStateRecord, nextMetaRecord.meta.headNodeId)) {
+    nextMetaRecord.meta.headNodeId = null;
+  }
+  if (Array.isArray(nextMetaRecord.meta.turns)) {
+    nextMetaRecord.meta.turns = nextMetaRecord.meta.turns.map((turn) => ({
+      ...turn,
+      attachmentNodeIds: [],
+    }));
+  }
   nextMetaRecord.meta.legacyImport = {
     source: 'graphchatv1',
     sourceChatId: chatId,
@@ -238,6 +316,11 @@ async function main() {
     destinationRoot,
     backupRoot,
     backgroundCopied: Boolean(backgroundMeta),
+    workingFolderPath,
+    mergedStateChatId: mergeStateChatId || null,
+    recoveredNodeCount: merged.addedNodeCount,
+    droppedAttachmentCount: stripped.droppedAttachmentCount,
+    droppedNodeCount: stripped.droppedNodeCount,
   }, null, 2));
 }
 
