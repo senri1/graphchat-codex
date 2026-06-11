@@ -36,14 +36,14 @@ function normalizeInjectedHistory(value) {
   return out;
 }
 
-function executableNames() {
-  return process.platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex'] : ['codex'];
+function executableNames(platform = process.platform) {
+  return platform === 'win32' ? ['codex.exe', 'codex.cmd', 'codex'] : ['codex'];
 }
 
-function pathCandidates() {
-  const names = executableNames();
+function pathCandidates(platform = process.platform, env = process.env) {
+  const names = executableNames(platform);
   const out = [];
-  for (const entry of String(process.env.PATH ?? '').split(path.delimiter)) {
+  for (const entry of String(env.PATH ?? '').split(path.delimiter)) {
     const dir = cleanString(entry);
     if (!dir) continue;
     for (const name of names) out.push(path.join(dir, name));
@@ -51,21 +51,53 @@ function pathCandidates() {
   return out;
 }
 
-function codexCandidates(resourcesPath) {
+function windowsCodexCandidates(env = process.env, fileSystem = fsSync) {
+  const localAppData = cleanString(env.LOCALAPPDATA);
+  if (!localAppData) return [];
+
+  const binDir = path.join(localAppData, 'OpenAI', 'Codex', 'bin');
+  const versioned = [];
+  try {
+    for (const entry of fileSystem.readdirSync(binDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(binDir, entry.name, 'codex.exe');
+      try {
+        const stat = fileSystem.statSync(candidate);
+        if (stat.isFile()) versioned.push({ path: candidate, mtimeMs: stat.mtimeMs });
+      } catch {
+        // Ignore stale or incomplete Codex app update directories.
+      }
+    }
+  } catch {
+    // The Codex desktop app is not installed for this user.
+  }
+
+  versioned.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return [...versioned.map((item) => item.path), path.join(binDir, 'codex.exe')];
+}
+
+function codexCandidates(resourcesPath, options = {}) {
+  const platform = cleanString(options.platform) || process.platform;
+  const env = options.env ?? process.env;
+  const fileSystem = options.fileSystem ?? fsSync;
   const out = [];
-  const configured = cleanString(process.env.GRAPHCHAT_CODEX_BINARY || process.env.CODEX_BINARY);
+  const configured = cleanString(env.GRAPHCHAT_CODEX_BINARY || env.CODEX_BINARY);
   if (configured) out.push(configured);
 
   if (resourcesPath) {
-    out.push(path.join(resourcesPath, process.platform === 'win32' ? 'codex.exe' : 'codex'));
+    out.push(path.join(resourcesPath, platform === 'win32' ? 'codex.exe' : 'codex'));
   }
 
-  if (process.platform === 'darwin') {
+  if (platform === 'win32') {
+    out.push(...windowsCodexCandidates(env, fileSystem));
+  }
+
+  if (platform === 'darwin') {
     out.push('/Applications/Codex.app/Contents/Resources/codex');
-    out.push(path.join(process.env.HOME || '', 'Applications', 'Codex.app', 'Contents', 'Resources', 'codex'));
+    out.push(path.join(env.HOME || '', 'Applications', 'Codex.app', 'Contents', 'Resources', 'codex'));
   }
 
-  out.push(...pathCandidates());
+  out.push(...pathCandidates(platform, env));
   return Array.from(new Set(out.map((candidate) => cleanString(candidate)).filter(Boolean)));
 }
 
@@ -464,5 +496,7 @@ class CodexProcessManager extends EventEmitter {
 
 module.exports = {
   CodexProcessManager,
+  codexCandidates,
   findCodexBinary,
+  windowsCodexCandidates,
 };
