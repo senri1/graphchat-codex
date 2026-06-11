@@ -5,9 +5,39 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
+  CodexProcessManager,
   codexCandidates,
   windowsCodexCandidates,
 } = require('../electron/codex/process-manager.cjs');
+
+function createGraphTurnHarness(t, respond) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'graphchat-codex-protocol-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+
+  const manager = new CodexProcessManager({
+    app: { getPath: () => cwd },
+    resourcesPath: cwd,
+  });
+  const calls = [];
+  manager.ensureStarted = async () => ({ state: 'ready', ready: true });
+  manager.request = async (method, params, options) => {
+    calls.push({ method, params, options });
+    return await respond(method, params, calls);
+  };
+  return { manager, cwd, calls };
+}
+
+function graphTurnArgs(cwd, extra = {}) {
+  return {
+    clientTag: 'assistant-node',
+    cwd,
+    prompt: 'Next question',
+    model: 'gpt-5.4',
+    effort: 'high',
+    developerInstructions: 'Use the current project.',
+    ...extra,
+  };
+}
 
 test('Windows Codex desktop binaries are ordered newest-first with the stable copy as fallback', (t) => {
   const localAppData = fs.mkdtempSync(path.join(os.tmpdir(), 'graphchat-codex-discovery-'));
@@ -57,4 +87,143 @@ test('explicit configuration stays ahead of bundled, desktop app, and PATH candi
     path.join(localAppData, 'OpenAI', 'Codex', 'bin', 'codex.exe'),
   ]);
   assert.equal(candidates[4], path.join(pathDir, 'codex.exe'));
+});
+
+test('a new graph conversation starts a thread before starting its first turn', async (t) => {
+  const { manager, cwd, calls } = createGraphTurnHarness(t, async (method) => {
+    if (method === 'thread/start') return { thread: { id: 'thread-new' } };
+    if (method === 'turn/start') return { turn: { id: 'turn-new' } };
+    throw new Error(`Unexpected request: ${method}`);
+  });
+
+  const result = await manager.startGraphTurn(graphTurnArgs(cwd));
+
+  assert.deepEqual(calls.map((call) => call.method), ['thread/start', 'turn/start']);
+  assert.deepEqual(calls[0].params, {
+    cwd,
+    model: 'gpt-5.4',
+    sandbox: 'workspace-write',
+    approvalPolicy: 'on-request',
+    developerInstructions: 'Use the current project.',
+  });
+  assert.deepEqual(calls[1].params, {
+    threadId: 'thread-new',
+    input: [{ type: 'text', text: 'Next question' }],
+    model: 'gpt-5.4',
+    effort: 'high',
+    summary: 'auto',
+  });
+  assert.deepEqual(result, {
+    clientTag: 'assistant-node',
+    threadId: 'thread-new',
+    turnId: 'turn-new',
+    mode: 'new',
+    rolledBackTurns: 0,
+    injectedItemCount: 0,
+    forkedFromThreadId: null,
+    forkedFromTurnId: null,
+  });
+});
+
+test('continuing the newest source turn resumes the existing Codex thread', async (t) => {
+  const { manager, cwd, calls } = createGraphTurnHarness(t, async (method) => {
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          cwd,
+          status: { type: 'idle' },
+          turns: [{ id: 'turn-a' }, { id: 'turn-b' }],
+        },
+      };
+    }
+    if (method === 'thread/resume') return { thread: { id: 'thread-1' } };
+    if (method === 'turn/start') return { turn: { id: 'turn-c' } };
+    throw new Error(`Unexpected request: ${method}`);
+  });
+
+  const result = await manager.startGraphTurn(
+    graphTurnArgs(cwd, { source: { threadId: 'thread-1', turnId: 'turn-b' } }),
+  );
+
+  assert.deepEqual(calls.map((call) => call.method), ['thread/read', 'thread/resume', 'turn/start']);
+  assert.deepEqual(calls[0].params, { threadId: 'thread-1', includeTurns: true });
+  assert.equal(calls[1].params.threadId, 'thread-1');
+  assert.equal(calls[2].params.threadId, 'thread-1');
+  assert.equal(result.mode, 'continue');
+  assert.equal(result.threadId, 'thread-1');
+  assert.equal(result.rolledBackTurns, 0);
+});
+
+test('continuing a historical source turn forks and rolls back the copied tail', async (t) => {
+  const { manager, cwd, calls } = createGraphTurnHarness(t, async (method) => {
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          cwd,
+          status: { type: 'idle' },
+          turns: [{ id: 'turn-a' }, { id: 'turn-b' }, { id: 'turn-c' }, { id: 'turn-d' }],
+        },
+      };
+    }
+    if (method === 'thread/fork') return { thread: { id: 'thread-2' } };
+    if (method === 'thread/rollback') return {};
+    if (method === 'turn/start') return { turn: { id: 'turn-e' } };
+    throw new Error(`Unexpected request: ${method}`);
+  });
+  const events = [];
+  manager.on('event', (event) => events.push(event));
+
+  const result = await manager.startGraphTurn(
+    graphTurnArgs(cwd, { source: { threadId: 'thread-1', turnId: 'turn-b' } }),
+  );
+
+  assert.deepEqual(calls.map((call) => call.method), [
+    'thread/read',
+    'thread/fork',
+    'thread/rollback',
+    'turn/start',
+  ]);
+  assert.equal(calls[1].params.threadId, 'thread-1');
+  assert.deepEqual(calls[2].params, { threadId: 'thread-2', numTurns: 2 });
+  assert.equal(calls[3].params.threadId, 'thread-2');
+  assert.equal(result.mode, 'fork');
+  assert.equal(result.threadId, 'thread-2');
+  assert.equal(result.rolledBackTurns, 2);
+  assert.equal(result.forkedFromThreadId, 'thread-1');
+  assert.equal(result.forkedFromTurnId, 'turn-b');
+  assert.deepEqual(events.find((event) => event.kind === 'graph-turn-associated'), {
+    kind: 'graph-turn-associated',
+    clientTag: 'assistant-node',
+    threadId: 'thread-2',
+    turnId: 'turn-e',
+    mode: 'fork',
+    forkedFromThreadId: 'thread-1',
+    forkedFromTurnId: 'turn-b',
+  });
+});
+
+test('legacy continuation injects the selected history into a fresh thread', async (t) => {
+  const history = [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Earlier question' }] },
+    { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Earlier answer' }] },
+  ];
+  const { manager, cwd, calls } = createGraphTurnHarness(t, async (method) => {
+    if (method === 'thread/start') return { thread: { id: 'thread-legacy' } };
+    if (method === 'thread/inject_items') return {};
+    if (method === 'turn/start') return { turn: { id: 'turn-new' } };
+    throw new Error(`Unexpected request: ${method}`);
+  });
+
+  const result = await manager.startGraphTurn(graphTurnArgs(cwd, { legacyHistory: history }));
+
+  assert.deepEqual(calls.map((call) => call.method), [
+    'thread/start',
+    'thread/inject_items',
+    'turn/start',
+  ]);
+  assert.deepEqual(calls[1].params, { threadId: 'thread-legacy', items: history });
+  assert.equal(result.mode, 'legacy');
+  assert.equal(result.injectedItemCount, 2);
 });

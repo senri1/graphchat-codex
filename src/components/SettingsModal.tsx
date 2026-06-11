@@ -162,6 +162,7 @@ type Props = {
   localSyncBackupUpdatedAt: number | null;
   canManageLocalSyncBackup: boolean;
   onDeleteLocalSyncBackup: () => void;
+  remoteSyncEnabled?: boolean;
   cloudSyncPath: string | null;
   cloudSyncLastPulledRevision: string | null;
   cloudSyncRemoteHeadRevision: string | null;
@@ -1802,9 +1803,9 @@ export default function SettingsModal(props: Props) {
                 <div className="settingsCard">
                   <div className="settingsRow">
                     <div className="settingsRow__text">
-                      <div className="settingsRow__title">Local sync backup (kept: 1)</div>
+                      <div className="settingsRow__title">Recovery backup (kept: 1)</div>
                       <div className="settingsRow__desc">
-                        Pull keeps one local fallback snapshot before replace. Delete it if you need to reclaim disk space.
+                        A previous storage restore may have left one local fallback snapshot. Delete it if you need to reclaim disk space.
                       </div>
                       <div className="settingsPathValue" title={props.localSyncBackupPath ?? ''}>
                         {props.localSyncBackupPath ?? 'Backup path unavailable in this mode.'}
@@ -1836,6 +1837,8 @@ export default function SettingsModal(props: Props) {
                   </div>
                 </div>
 
+                {props.remoteSyncEnabled ? (
+                  <>
                 <div className="settingsCard">
                   <div className="settingsRow settingsRow--stack">
                     <div className="settingsRow__text">
@@ -2086,6 +2089,8 @@ export default function SettingsModal(props: Props) {
                     </div>
                   </div>
                 </div>
+                  </>
+                ) : null}
               </div>
             ) : null}
 

@@ -353,6 +353,9 @@ class CodexProcessManager extends EventEmitter {
         clientTag,
         threadId,
         turnId,
+        mode,
+        forkedFromThreadId,
+        forkedFromTurnId: mode === 'fork' ? sourceTurnId : null,
       });
       this.#flushPendingGraphEvents(turnId, clientTag);
       return {
@@ -363,6 +366,7 @@ class CodexProcessManager extends EventEmitter {
         rolledBackTurns,
         injectedItemCount,
         forkedFromThreadId,
+        forkedFromTurnId: mode === 'fork' ? sourceTurnId : null,
       };
     } finally {
       this.pendingGraphStarts = Math.max(0, this.pendingGraphStarts - 1);

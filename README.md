@@ -68,6 +68,7 @@ The application currently supports:
 - Official Codex thread listing, searching, pagination, import, and refresh.
 - Import matching by `turnId`, including shared turn IDs in forked threads.
 - Preservation of GraphChat-only branches and layouts during refresh.
+- Multi-thread linkage metadata for graphs containing native Codex forks.
 - Legacy GraphChatV1 import and continuation.
 - Filesystem-backed conversation context.
 - Editable Markdown document nodes and immutable conversation nodes.
@@ -87,9 +88,15 @@ A completed assistant node can store:
   cwd,
   model?,
   effort?,
-  forkedFromThreadId?
+  forkedFromThreadId?,
+  forkedFromTurnId?
 }
 ```
+
+Each chat also stores a rebuildable `codexThreads` index containing every native
+Codex thread represented by the graph. Node checkpoints remain authoritative for
+continuation; the chat-level index supports lookup, refresh, ancestry, and
+lifecycle operations.
 
 Turn behavior:
 
@@ -334,6 +341,10 @@ The user can select a different storage base directory in Settings. Respect
 Codex native threads are not stored in GraphChat managed storage. They remain in
 the Codex data domain.
 
+GraphChat Codex is intentionally local-only. Cloud-folder and direct Google
+Drive sync controls are not exposed because working folders and native Codex
+thread state are machine-specific. Use local exports and backups for recovery.
+
 ## Running From Source
 
 Prerequisites:
@@ -406,20 +417,16 @@ Installers are currently unsigned.
 
 These are useful future priorities, not claims of implemented behavior:
 
-1. Formalize multi-thread metadata for graphs containing several native forks.
-2. Add broader automated importer and branch-protocol fixtures.
-3. Define refresh/conflict behavior when another Codex client changes a thread
+1. Define refresh/conflict behavior when another Codex client changes a thread
    while GraphChat is open.
-4. Render richer Codex events such as tool calls, command output, file changes,
+2. Render richer Codex events such as tool calls, command output, file changes,
    plans, and statuses.
-5. Add native thread rename/archive lifecycle actions.
-6. Send supported files and images to Codex. Current GraphChat generation is
+3. Add native thread rename/archive lifecycle actions.
+4. Send supported files and images to Codex. Current GraphChat generation is
    primarily text-only.
-7. Test Drive sync with imported raw payloads and multi-thread graphs.
-8. Define mobile continuation through a remote runtime or desktop relay.
-9. Continue Windows testing for authentication, binary discovery, storage paths,
+5. Continue Windows testing for authentication, binary discovery, storage paths,
    migration, and packaging.
-10. Replace remaining inherited API-provider assumptions as Codex becomes the
+6. Replace remaining inherited API-provider assumptions as Codex becomes the
     complete primary backend.
 
 ## Orientation Map

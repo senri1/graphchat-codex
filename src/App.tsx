@@ -119,6 +119,13 @@ import {
   resolveCodexComposerModelId,
   type CodexRuntimeModel,
 } from './codex/models';
+import {
+  hasCodexThreadLink,
+  normalizeCodexThreadLinks,
+  upsertCodexThreadLink,
+  type CodexThreadLinkOrigin,
+  type CodexThreadLinks,
+} from './codex/threadLinks';
 
 type ChatTurnMeta = {
   id: string;
@@ -144,8 +151,7 @@ type ChatRuntimeMeta = {
   llm: OpenAIChatSettings;
   backgroundStorageKey: string | null;
   codexWorkingFolderPath: string | null;
-  codexImportedThreadId?: string | null;
-  codexImportedUpdatedAt?: number | null;
+  codexThreads: CodexThreadLinks;
   legacyImport?: {
     source: 'graphchatv1';
     sourceChatId?: string;
@@ -214,6 +220,8 @@ type GenerationJob = {
   codexModel?: string | null;
   codexEffort?: CodexConversationRef['effort'];
   codexForkedFromThreadId?: string | null;
+  codexForkedFromTurnId?: string | null;
+  codexThreadOrigin?: CodexThreadLinkOrigin;
 };
 
 function normalizeCodexConversationRef(value: unknown): CodexConversationRef | null {
@@ -237,6 +245,10 @@ function normalizeCodexConversationRef(value: unknown): CodexConversationRef | n
     typeof raw.forkedFromThreadId === 'string' && raw.forkedFromThreadId.trim()
       ? raw.forkedFromThreadId.trim()
       : undefined;
+  const forkedFromTurnId =
+    typeof raw.forkedFromTurnId === 'string' && raw.forkedFromTurnId.trim()
+      ? raw.forkedFromTurnId.trim()
+      : undefined;
   return {
     threadId,
     turnId,
@@ -244,6 +256,7 @@ function normalizeCodexConversationRef(value: unknown): CodexConversationRef | n
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(forkedFromThreadId ? { forkedFromThreadId } : {}),
+    ...(forkedFromTurnId ? { forkedFromTurnId } : {}),
   };
 }
 
@@ -3265,6 +3278,7 @@ export default function App() {
       llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
       backgroundStorageKey: null,
       codexWorkingFolderPath: null,
+      codexThreads: {},
     });
     return { root, chatId, chatStates, chatMeta };
   }, []);
@@ -3295,6 +3309,7 @@ export default function App() {
       llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
       backgroundStorageKey: null,
       codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+      codexThreads: {},
     };
     chatMetaRef.current.set(chatId, meta);
     return meta;
@@ -3865,7 +3880,11 @@ export default function App() {
                 folderPath: info?.folderPath ?? [],
                 cwd,
                 nodes,
-                meta: { turns: meta.turns, legacyImport: meta.legacyImport },
+                meta: {
+                  turns: meta.turns,
+                  codexThreads: meta.codexThreads,
+                  legacyImport: meta.legacyImport,
+                },
               },
             ];
           });
@@ -4762,6 +4781,8 @@ export default function App() {
       codexModel,
       codexEffort,
       codexForkedFromThreadId: null,
+      codexForkedFromTurnId: null,
+      codexThreadOrigin: legacyHistory.length ? 'legacy' : 'created',
     };
 
     generationJobsByAssistantIdRef.current.set(job.assistantNodeId, job);
@@ -4815,6 +4836,13 @@ export default function App() {
       job.codexThreadId = response.result.threadId;
       job.codexTurnId = response.result.turnId;
       job.codexForkedFromThreadId = response.result.forkedFromThreadId ?? null;
+      job.codexForkedFromTurnId = response.result.forkedFromTurnId ?? null;
+      job.codexThreadOrigin =
+        response.result.mode === 'fork'
+          ? 'forked'
+          : response.result.mode === 'legacy'
+            ? 'legacy'
+            : job.codexThreadOrigin ?? 'created';
       updateStoredTextNode(args.chatId, args.assistantNodeId, {
         llmTask: {
           provider: 'codex',
@@ -4864,6 +4892,16 @@ export default function App() {
       if (event.kind === 'graph-turn-associated') {
         job.codexThreadId = String(event.threadId ?? '').trim() || job.codexThreadId;
         job.codexTurnId = String(event.turnId ?? '').trim() || job.codexTurnId;
+        job.codexForkedFromThreadId =
+          String(event.forkedFromThreadId ?? '').trim() || job.codexForkedFromThreadId;
+        job.codexForkedFromTurnId =
+          String(event.forkedFromTurnId ?? '').trim() || job.codexForkedFromTurnId;
+        job.codexThreadOrigin =
+          event.mode === 'fork'
+            ? 'forked'
+            : event.mode === 'legacy'
+              ? 'legacy'
+              : job.codexThreadOrigin ?? 'created';
         return;
       }
       if (event.kind !== 'notification') return;
@@ -4908,7 +4946,16 @@ export default function App() {
             model: job.codexModel,
             ...(job.codexEffort ? { effort: job.codexEffort } : {}),
             ...(job.codexForkedFromThreadId ? { forkedFromThreadId: job.codexForkedFromThreadId } : {}),
+            ...(job.codexForkedFromTurnId ? { forkedFromTurnId: job.codexForkedFromTurnId } : {}),
           };
+          const meta = ensureChatMeta(job.chatId);
+          meta.codexThreads = upsertCodexThreadLink(meta.codexThreads, {
+            threadId: job.codexThreadId,
+            cwd: job.codexCwd,
+            origin: job.codexThreadOrigin ?? (job.codexForkedFromThreadId ? 'forked' : 'created'),
+            ...(job.codexForkedFromThreadId ? { forkedFromThreadId: job.codexForkedFromThreadId } : {}),
+            ...(job.codexForkedFromTurnId ? { forkedFromTurnId: job.codexForkedFromTurnId } : {}),
+          });
           updateStoredTextNode(job.chatId, job.assistantNodeId, { codexRef });
           if (activeChatIdRef.current === job.chatId) {
             engineRef.current?.setTextNodeCodexRef(job.assistantNodeId, codexRef);
@@ -7540,6 +7587,17 @@ export default function App() {
           const llmRaw = raw?.llm ?? null;
           const backgroundStorageKey = typeof raw?.backgroundStorageKey === 'string' ? raw.backgroundStorageKey : null;
           if (backgroundStorageKey) backgroundKeysInChats.add(backgroundStorageKey);
+          const storedState = chatStates.get(chatId);
+          const codexWorkingFolderPath = (() => {
+            const currentPath =
+              typeof raw?.codexWorkingFolderPath === 'string' && raw.codexWorkingFolderPath.trim()
+                ? raw.codexWorkingFolderPath.trim()
+                : typeof raw?.codexWorkspacePath === 'string' && raw.codexWorkspacePath.trim()
+                  ? raw.codexWorkspacePath.trim()
+                  : null;
+            if (currentPath) return currentPath;
+            return findCodexWorkingFolderInNodes(storedState?.nodes ?? []) ?? resolvedDefaultWorkingFolderPath;
+          })();
 
           if (chatId === desiredActiveChatId) {
             legacyVisualFromActive = {
@@ -7596,24 +7654,14 @@ export default function App() {
               webSearchEnabled: Boolean(llmRaw?.webSearchEnabled),
             },
             backgroundStorageKey: backgroundStorageKey,
-            codexWorkingFolderPath: (() => {
-              const currentPath =
-              typeof raw?.codexWorkingFolderPath === 'string' && raw.codexWorkingFolderPath.trim()
-                ? raw.codexWorkingFolderPath.trim()
-                : typeof raw?.codexWorkspacePath === 'string' && raw.codexWorkspacePath.trim()
-                  ? raw.codexWorkspacePath.trim()
-                  : null;
-              if (currentPath) return currentPath;
-              const storedState = chatStates.get(chatId);
-              return findCodexWorkingFolderInNodes(storedState?.nodes ?? []) ?? resolvedDefaultWorkingFolderPath;
-            })(),
-            codexImportedThreadId:
-              typeof raw?.codexImportedThreadId === 'string' && raw.codexImportedThreadId.trim()
-                ? raw.codexImportedThreadId.trim()
-                : null,
-            codexImportedUpdatedAt: Number.isFinite(Number(raw?.codexImportedUpdatedAt))
-              ? Number(raw.codexImportedUpdatedAt)
-              : null,
+            codexWorkingFolderPath,
+            codexThreads: normalizeCodexThreadLinks({
+              rawLinks: raw?.codexThreads,
+              nodes: storedState?.nodes ?? [],
+              workingFolder: codexWorkingFolderPath,
+              legacyImportedThreadId: raw?.codexImportedThreadId,
+              legacyImportedUpdatedAt: raw?.codexImportedUpdatedAt,
+            }),
             legacyImport:
               raw?.legacyImport?.source === 'graphchatv1'
                 ? {
@@ -7887,6 +7935,7 @@ export default function App() {
       llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
       backgroundStorageKey: null,
       codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+      codexThreads: {},
     });
     switchChat(id);
   };
@@ -8185,8 +8234,20 @@ export default function App() {
 	        const item: WorkspaceChat = { kind: 'chat', id: newChatId, name: res.chatName };
 	        nextRoot = insertItem(nextRoot, ensured.folderId, item);
 
-          const importedMeta = res.meta as ChatRuntimeMeta;
-          importedMeta.codexWorkingFolderPath = defaultCodexWorkingFolderPathRef.current;
+          const importedRawMeta = res.meta as any;
+          const importedMeta = {
+            ...importedRawMeta,
+            codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+            codexThreads: normalizeCodexThreadLinks({
+              rawLinks: importedRawMeta?.codexThreads,
+              nodes: res.state.nodes,
+              workingFolder: defaultCodexWorkingFolderPathRef.current,
+              legacyImportedThreadId: importedRawMeta?.codexImportedThreadId,
+              legacyImportedUpdatedAt: importedRawMeta?.codexImportedUpdatedAt,
+            }),
+          } as ChatRuntimeMeta;
+          delete (importedMeta as any).codexImportedThreadId;
+          delete (importedMeta as any).codexImportedUpdatedAt;
           const archiveAppName =
             typeof (archiveObj as any)?.app?.name === 'string'
               ? String((archiveObj as any).app.name).trim().toLowerCase()
@@ -8317,6 +8378,7 @@ export default function App() {
           llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
           backgroundStorageKey: null,
           codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+          codexThreads: {},
         });
         switchChat(id, { saveCurrent: false });
         return;
@@ -9163,7 +9225,7 @@ export default function App() {
     const id = String(threadId ?? '').trim();
     if (!id) return null;
     for (const [chatId, meta] of chatMetaRef.current.entries()) {
-      if (meta.codexImportedThreadId === id) return chatId;
+      if (hasCodexThreadLink(meta.codexThreads, id)) return chatId;
     }
     for (const [chatId, state] of chatStatesRef.current.entries()) {
       const linked = state.nodes.some(
@@ -9236,8 +9298,13 @@ export default function App() {
     ];
     meta.headNodeId = merged.headNodeId;
     meta.codexWorkingFolderPath = cwd;
-    meta.codexImportedThreadId = threadId;
-    meta.codexImportedUpdatedAt = Number.isFinite(Number(thread.updatedAt)) ? Number(thread.updatedAt) : Date.now() / 1000;
+    meta.codexThreads = upsertCodexThreadLink(meta.codexThreads, {
+      threadId,
+      cwd,
+      origin: thread.forkedFromId ? 'forked' : 'imported',
+      ...(thread.forkedFromId ? { forkedFromThreadId: thread.forkedFromId } : {}),
+      lastSeenUpdatedAt: Number.isFinite(Number(thread.updatedAt)) ? Number(thread.updatedAt) : Date.now() / 1000,
+    });
 
     if (isNewChat) {
       const item: WorkspaceChat = {
@@ -12125,6 +12192,7 @@ export default function App() {
             localSyncBackupUpdatedAt={localSyncBackupInfo?.updatedAt ?? null}
             canManageLocalSyncBackup={canManageLocalSyncBackup}
             onDeleteLocalSyncBackup={deleteLocalSyncBackup}
+            remoteSyncEnabled={false}
             cloudSyncPath={cloudSyncInfo?.cloudDir ?? null}
             cloudSyncLastPulledRevision={cloudSyncInfo?.lastPulledRevision ?? null}
             cloudSyncRemoteHeadRevision={cloudSyncInfo?.remoteHeadRevision ?? null}
@@ -12219,6 +12287,7 @@ export default function App() {
               llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
               backgroundStorageKey: null,
               codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+              codexThreads: {},
             });
 
             chatStatesRef.current = chatStates;

@@ -74,6 +74,7 @@ interface Window {
         rolledBackTurns: number;
         injectedItemCount?: number;
         forkedFromThreadId?: string | null;
+        forkedFromTurnId?: string | null;
       };
       error?: string;
     }>;

@@ -30,6 +30,7 @@ export type CodexConversationRef = {
   model?: string;
   effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
   forkedFromThreadId?: string;
+  forkedFromTurnId?: string;
 };
 
 export type ChatAttachment =

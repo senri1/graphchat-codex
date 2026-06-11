@@ -250,6 +250,7 @@ async function main() {
   };
   delete nextMetaRecord.meta.codexImportedThreadId;
   delete nextMetaRecord.meta.codexImportedUpdatedAt;
+  delete nextMetaRecord.meta.codexThreads;
 
   const backgroundKey = String(nextMetaRecord.meta.backgroundStorageKey || '').trim();
   const backgroundMeta = await copyBackground({

@@ -84,6 +84,7 @@ function normalizeCodexRef(raw) {
   const model = asTrimmedString(raw.model);
   const effort = asTrimmedString(raw.effort);
   const forkedFromThreadId = asTrimmedString(raw.forkedFromThreadId);
+  const forkedFromTurnId = asTrimmedString(raw.forkedFromTurnId);
   return {
     threadId,
     turnId,
@@ -91,6 +92,7 @@ function normalizeCodexRef(raw) {
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
     ...(forkedFromThreadId ? { forkedFromThreadId } : {}),
+    ...(forkedFromTurnId ? { forkedFromTurnId } : {}),
   };
 }
 

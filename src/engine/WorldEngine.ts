@@ -1491,6 +1491,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
             typeof raw.forkedFromThreadId === 'string' && raw.forkedFromThreadId.trim()
               ? raw.forkedFromThreadId.trim()
               : undefined;
+          const forkedFromTurnId =
+            typeof raw.forkedFromTurnId === 'string' && raw.forkedFromTurnId.trim()
+              ? raw.forkedFromTurnId.trim()
+              : undefined;
           return {
             threadId,
             turnId,
@@ -1498,6 +1502,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
             ...(model ? { model } : {}),
             ...(effort ? { effort } : {}),
             ...(forkedFromThreadId ? { forkedFromThreadId } : {}),
+            ...(forkedFromTurnId ? { forkedFromTurnId } : {}),
           } as CodexConversationRef;
         })();
         const node: TextNode = {
