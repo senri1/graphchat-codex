@@ -1,203 +1,445 @@
-# GraphChat Codex
+# GraphChat Codex: AI Project Context
 
-GraphChat Codex is an experimental Codex-App-Server-native fork of GraphChatV1. It keeps the visual branching UI while replacing the model runtime in stages.
+Last updated: 2026-06-11
 
-This repository is deliberately isolated from GraphChatV1:
+This README is primarily operational context for AI coding agents. Read it before
+changing the repository. Verify details against the code when they affect data
+integrity or Codex App Server protocol behavior.
 
-- Separate Git history
-- Separate Electron application identity
-- Separate desktop user-data and managed-storage roots
-- Separate Google Drive sync folder name
-- Separate browser IndexedDB and local-storage keys
+## Objective
 
-## Current milestone
+GraphChat Codex is a personal, graph-based desktop interface for the OpenAI Codex
+App Server.
 
-The first GraphChat conversation slice is working:
+The intended product:
 
-- Discovers and launches a local `codex app-server` over stdio
-- Initializes the versioned JSON-RPC protocol
-- Uses Codex/ChatGPT account authentication managed by Codex
-- Reads available Codex models and rate-limit windows
-- Sends normal GraphChat text turns through the Codex runtime
-- Streams assistant text and reasoning summaries into graph nodes
-- Continues a Codex thread from its current graph tip
-- Forks and rolls back a Codex thread when replying from an older graph node
-- Persists the Codex thread and turn checkpoint on each completed assistant node
-- Resumes branches after restarting GraphChat
-- Interrupts active turns and routes command/file approval requests through GraphChat
-- Lists official Codex threads from the shared App Server history, grouped by working folder
-- Imports official Codex turns as portable GraphChat nodes with their native thread checkpoints
-- Refreshes imported threads without duplicating matching turns or removing GraphChat-only branches
-- Continues and branches imported official threads through the same native Codex runtime
+- Uses Codex/ChatGPT authentication, subscription limits, models, and tools.
+- Shares native Codex thread history with official Codex clients.
+- Displays linear Codex threads as branches inside a persistent visual graph.
+- Allows a reply to an older completed turn to become a native Codex fork.
+- Keeps portable visible user and assistant text in GraphChat storage.
+- Supports editable Markdown notes and diary-like documents.
+- Gives Codex filesystem access to every node in a chat, including nodes outside
+  the active native thread ancestry.
+- May eventually support the inherited API-provider backend through a clean
+  backend abstraction, but Codex is the primary runtime.
 
-Open the terminal-shaped **Codex runtime** button in the right toolbar to inspect the connection, account, limits, models, reasoning effort, and streamed test output.
+This repository is separate from GraphChatV1. Do not modify a GraphChatV1
+checkout or its storage unless the user explicitly requests it.
 
-Open the list-shaped **Codex threads** button to browse the same thread history used by Codex clients. Importing a thread
-creates a GraphChat chat locked to that thread's working folder. Opening it again refreshes official turns in place while
-retaining portable node text, raw turn payloads, layout, and GraphChat-created branches.
+## Ownership Boundary
 
-New chats inherit the default Codex working folder from **Settings -> Codex**. GraphChat manages
-`~/.graphchat-codex/threads` as the initial default, or you can choose another folder. Before sending the first message,
-use the chat's three-dot sidebar menu to change its working folder. The folder is fixed after the first message so a
-Codex thread never silently mixes working directories.
+GraphChat owns:
 
-New root messages create Codex threads. Continuing from the latest assistant node reuses its thread; replying from an
-older assistant node creates an independent native fork at that checkpoint.
+- Graph topology, branches, node positions, and layout.
+- Portable visible user and assistant text.
+- Editable user documents.
+- Chat metadata and GraphChat-only branches.
+- Raw imported Codex payload copies.
+- Export and sync data.
 
-This milestone is text-only. Ink and file attachments remain visible in stored chats, but cannot yet be sent to Codex.
+Codex owns:
 
-## Run from source
+- ChatGPT authentication and subscription limits.
+- Models and reasoning effort.
+- Native linear threads and turns.
+- Reasoning state.
+- Tool execution and approvals.
+- Native thread history in the Codex data domain.
+
+GraphChat launches its own local `codex app-server` process using the installed
+Codex executable. It shares Codex authentication and thread storage with official
+clients; it does not need to share the exact same running process.
+
+## Implemented State
+
+The application currently supports:
+
+- Codex executable discovery and App Server startup over stdio.
+- Versioned JSON-RPC initialization.
+- ChatGPT device-code login and logout.
+- Account, model, reasoning-effort, and rate-limit display.
+- Streaming assistant text and reasoning summaries into graph nodes.
+- Turn cancellation and error handling.
+- Command and file approval prompts.
+- Native continuation and branching.
+- Persistence and restart recovery.
+- Per-chat working folders.
+- Official Codex thread listing, searching, pagination, import, and refresh.
+- Import matching by `turnId`, including shared turn IDs in forked threads.
+- Preservation of GraphChat-only branches and layouts during refresh.
+- Legacy GraphChatV1 import and continuation.
+- Filesystem-backed conversation context.
+- Editable Markdown document nodes and immutable conversation nodes.
+
+At the last verified milestone, `npm run typecheck`, the Codex tests, context
+storage tests, and the production build passed. Existing Vite PDF/chunk-size
+warnings are non-blocking.
+
+## Native Thread Protocol
+
+A completed assistant node can store:
+
+```ts
+{
+  threadId,
+  turnId,
+  cwd,
+  model?,
+  effort?,
+  forkedFromThreadId?
+}
+```
+
+Turn behavior:
+
+- New root conversation: `thread/start`, then `turn/start`.
+- Reply to the newest native turn: `thread/resume`, then `turn/start`.
+- Reply to an older native turn: `thread/fork`, `thread/rollback`, then
+  `turn/start`.
+- Reply to a legacy branch: `thread/start`, `thread/inject_items`, then
+  `turn/start`.
+
+For legacy history, GraphChat builds only the selected root-to-node path.
+Non-text and empty nodes are skipped. Consecutive nodes with the same author are
+grouped into one injected message. Provider payloads and old tool output are not
+injected.
+
+Important implementation:
+
+- `electron/codex/process-manager.cjs`
+- `electron/codex/ipc-handlers.cjs`
+- `src/codex/legacyHistory.ts`
+- `src/codex/threadImport.ts`
+
+## Node Semantics
+
+Text nodes have explicit storage roles:
+
+- A bottom-right new text node is an editable Markdown document.
+- A header-reply user node is an editable draft while composing.
+- The reply draft becomes immutable when sent.
+- Sent user nodes and assistant nodes are immutable conversation records.
+- All imported GraphChatV1 text nodes are immutable.
+
+Use `documentNode`, `conversationDraft`, and `isEditNode`. Do not restore the old
+node-ID-prefix heuristic for editability.
+
+Replying from an editable document starts a fresh Codex branch. The document text
+is used as the user prompt/history source as appropriate; it does not continue an
+unrelated native thread.
+
+Important implementation:
+
+- `src/model/chat.ts`
+- `src/engine/WorldEngine.ts`
+- `src/App.tsx`
+
+## Working Folders
+
+Each GraphChat chat has one Codex working folder (`cwd`):
+
+- A new chat inherits the configured default working folder.
+- The folder may be changed while the graph has no nodes.
+- It becomes fixed when the first node is created.
+- An imported official Codex thread keeps and locks to its original `cwd`.
+- An imported legacy chat receives an explicit `cwd`.
+
+Avoid using this repository as the CWD for general personal chats. A visible
+folder such as the following is preferable on Windows:
+
+```text
+%USERPROFILE%\Documents\GraphChatThreads
+```
+
+The older default `~/.graphchat-codex/threads` is valid but inconvenient to open
+as a project because it is hidden on Unix-like systems.
+
+## Conversation Context
+
+GraphChat projects each chat into its CWD:
+
+```text
+<cwd>/conversation-context/
+|-- AGENTS.md
+|-- INDEX.md
+`-- chats/
+    `-- <encoded-chat-id>/
+        |-- README.md
+        |-- graph.json
+        |-- conflicts/
+        `-- nodes/
+            |-- documents/
+            `-- conversation/
+```
+
+Meaning:
+
+- `nodes/documents/*.md`: editable user documents.
+- `nodes/conversation/*.md`: immutable user and assistant messages.
+- `graph.json`: topology, metadata, content paths/hashes, and Codex checkpoints.
+  Full node text remains in the Markdown files.
+- `README.md`: per-chat preview and statistics.
+- `INDEX.md`: entry point for finding relevant chats in the same CWD.
+- `AGENTS.md`: search and editing rules for Codex.
+
+Each Codex turn receives developer instructions with the exact current chat path.
+The instruction says:
+
+- If required information is missing from the current native thread, search the
+  current chat's node Markdown files.
+- If it may be in another chat, consult `conversation-context/INDEX.md`.
+- Consult `graph.json` when ancestry, branches, or checkpoints matter.
+
+The Markdown files are not automatically inserted into every model request.
+Codex reads and searches them with its normal filesystem tools when relevant.
+
+External edits to document files are loaded back into GraphChat. If both the app
+and disk changed a document, the disk version wins and GraphChat preserves its
+version under `conflicts/`. Conversation files are regenerated from app state and
+made read-only where the platform supports it.
+
+`conversation-context/` is ignored in this repository so personal chats are not
+accidentally committed when this repo is used as a chat CWD.
+
+Important implementation:
+
+- `electron/conversation-context-storage.cjs`
+- `src/storage/persistence.ts`
+- `src/App.tsx`
+- `test/conversation-context-storage.test.cjs`
+
+## Official Codex Thread Import
+
+The thread browser uses App Server `thread/list` and `thread/read`.
+
+- Importing an unlinked native thread creates a new GraphChat chat.
+- Reopening an already-linked thread refreshes that linked GraphChat chat.
+- A new import must not be merged into an arbitrary active GraphChat chat.
+- Imported visible text remains usable if local native Codex history later
+  becomes unavailable.
+- Refresh must remain idempotent and preserve GraphChat-only branches, layout,
+  model metadata, and checkpoints.
+
+## Legacy GraphChatV1 Migration
+
+The one-chat importer is:
+
+```text
+scripts/import-graphchatv1-chat.cjs
+```
+
+Its default paths are macOS-specific. On Windows, always discover storage and
+pass explicit paths:
+
+```powershell
+node scripts/import-graphchatv1-chat.cjs `
+  --source-root="<GraphChatV1Data\v1>" `
+  --destination-root="<GraphChatCodexData\v1>" `
+  --chat-id="<source-chat-id>" `
+  --cwd="<existing working folder>"
+```
+
+Optional recovery:
+
+```text
+--merge-state-chat-id=<orphan-source-chat-id>
+```
+
+Migration rules:
+
+- Close GraphChatV1 and GraphChat Codex before writing storage.
+- Never mutate the GraphChatV1 source.
+- Back up the complete GraphChat Codex destination before import. The importer
+  also creates a destination backup for each imported chat.
+- Preserve graph topology, layout, and visible text.
+- Drop old provider payloads, attachments, PDF nodes, and stale tool/runtime
+  state.
+- Copy the background if its blob is available.
+- Mark imports with `meta.legacyImport.source = "graphchatv1"`.
+- Detect duplicate imports through `legacyImport.sourceChatId`.
+- Place imported chats under `Imported from GraphChatV1`.
+- Do not commit migrated storage or generated context files.
+
+Likely Windows paths, which must be verified rather than assumed:
+
+```text
+Source:
+%APPDATA%\Electron\GraphChatV1Data\v1
+
+Default destination:
+%APPDATA%\GraphChat Codex\GraphChatCodexData\v1
+```
+
+If `%APPDATA%\GraphChat Codex\storage-location.json` defines
+`storageBaseDir`, the destination is:
+
+```text
+<storageBaseDir>\GraphChatCodexData\v1
+```
+
+### Pending Windows Legacy Import
+
+The Windows GraphChatV1 copy is expected to contain the same synchronized legacy
+data as the original machine. Import these five meaningful chats:
+
+| Source chat ID | Name |
+| --- | --- |
+| `chat_186774a9-e037-480d-a8a0-0f4e24b9f154` | Chat 1 |
+| `chat_7e444bd0-5359-431d-be2a-454e5f3db408` | Polynomial functors |
+| `chat_226330bb-6ce3-4741-990a-f92b01862208` | main |
+| `chat_46c23cff-b590-499c-b3ca-dd51a12ef668` | experiment |
+| `chat_c8251f40-34fc-454f-aab2-41ee6b03e3e1` | Prefix syntax and polynomial functors |
+
+For `Prefix syntax and polynomial functors`, merge this orphan state:
+
+```text
+chat_9ca0e8f2-affd-4b80-82c9-ab6ed201a04e
+```
+
+Do not create a separate visible chat for that orphan.
+
+These appear to be placeholders and should not be imported unless inspection
+finds meaningful content absent from the five chats:
+
+```text
+chat_83221aa1-021b-4313-a77f-69e27774a058
+chat_26683f6e-5daf-47a6-827d-a5288fdd4a3a
+```
+
+After migration, verify exactly one destination chat per source ID, valid JSON,
+an existing `codexWorkingFolderPath`, expected node IDs after PDF removal, and
+successful app startup.
+
+## Desktop Storage
+
+GraphChat Codex has a separate Electron identity and storage root from
+GraphChatV1.
+
+Default managed data root:
+
+```text
+<Electron userData>/GraphChatCodexData/v1
+```
+
+On Windows, Electron `userData` is normally:
+
+```text
+%APPDATA%\GraphChat Codex
+```
+
+The user can select a different storage base directory in Settings. Respect
+`storage-location.json` before reading or writing managed storage.
+
+Codex native threads are not stored in GraphChat managed storage. They remain in
+the Codex data domain.
+
+## Running From Source
 
 Prerequisites:
 
-- Node.js and `npm`
-- A working Codex installation, or `GRAPHCHAT_CODEX_BINARY` pointing to a Codex executable that supports `app-server`
+- Node.js and npm.
+- A working Codex installation, or `GRAPHCHAT_CODEX_BINARY` pointing to a Codex
+  executable that supports `app-server`.
 
-```bash
-cd /Users/sen/Code/graphchat-codex
-npm ci
-npm run dev
+Install:
+
+```powershell
+npm install
 ```
 
-In a second terminal:
+Start Vite in one terminal:
 
-```bash
-cd /Users/sen/Code/graphchat-codex
+```powershell
+npm run dev -- --host 127.0.0.1
+```
+
+Start Electron in another terminal:
+
+```powershell
 npm run electron:dev
 ```
 
-The renderer runs on `http://localhost:3001`. The browser build can render the UI, but Codex authentication and App Server execution require Electron.
+Vite is configured for port `3001`. Browser-only rendering is useful for UI
+inspection, but Codex authentication, filesystem access, App Server execution,
+and desktop persistence require Electron.
 
-## Quickest way to start using it (pre-release)
+## Validation
 
-1. Go to **Releases** on the right side of the repo page.
-2. Download the installer for your OS:
-   - Windows: `.exe`
-   - macOS: `.dmg`
-3. Install and open GraphChatV1.
+Run the smallest relevant checks while developing, then broaden for shared or
+user-facing behavior:
 
-Note: pre-release installers are currently unsigned, so your OS may show a security prompt.
-
-## Running in browser (useful for phone/tablet testing)
-
-### Prerequisite software
-
-- A modern browser (Chrome, Edge, Safari)
-- `npm` (only if you want to run the browser build locally from source)
-- Provider API key(s) for AI features (BYO keys)
-
-### Start in browser (local dev)
-
-```bash
-cd graphchatv1
-npm install
-npm run dev
+```powershell
+npm run typecheck
+npm run test:codex
+npm run test:legacy-history
+npm run test:context
+npm run build
 ```
 
-Then open the local URL shown in the terminal (typically `http://localhost:5173`).
+Build installers:
 
-### Browser mode notes
-
-- GraphChat calls provider APIs from the browser (BYO API key).
-- Anthropic browser requests require `anthropic-dangerous-direct-browser-access: true` (GraphChat sets this automatically).
-- Optional proxy for local dev: Vite can proxy `/api/openai/v1/*` and `/api/anthropic/v1/*` in `npm run dev` / `npm run preview`.
-  - Set `VITE_OPENAI_API_BASE_URL=/api/openai/v1` and/or `VITE_ANTHROPIC_API_BASE_URL=/api/anthropic/v1` in `.env.local`.
-- Local LaTeX compile with `latexmk` is a desktop feature.
-
-## Running in desktop / standalone mode
-
-### Prerequisite software
-
-- For installer use (`.dmg` / `.exe`): no `npm` required.
-- For desktop run from source: Node.js + `npm`.
-- For local LaTeX compile in LaTeX nodes: TeX toolchain with both `latexmk` and `synctex` available on `PATH`.
-  - macOS: MacTeX
-  - Windows: MiKTeX or TeX Live
-
-At startup in desktop mode, GraphChat checks for `latexmk` and `synctex` and shows guidance if missing.
-
-### Start in desktop mode (from installer)
-
-1. Download `.dmg` (macOS) or `.exe` (Windows) from **Releases**.
-2. Install and launch GraphChatV1.
-
-### Start in desktop mode (from source)
-
-```bash
-cd graphchatv1
-npm install
-npm run dev
-# in a second terminal:
-npm run electron:dev
+```powershell
+npm run dist:win
 ```
 
-In desktop mode, LaTeX nodes use local compilation via Electron IPC + `latexmk` and render PDF in the node editor.
-
-## First things to try
-
-- Drag to pan
-- Pinch (touch) to zoom
-- Trackpad pinch (Chrome/Edge): `ctrl` + wheel
-- Tool: `Select` / `Draw` (pen always draws)
-- Move node: drag a node
-- Resize node: drag a corner handle
-- Edit node: double-click / `Enter` (commit with click-outside / Done, cancel with `Esc`)
-- Import PDF: click `Import PDF` (creates a new PDF node)
-- New LaTeX node: click `+LaTeX`, write `.tex` on the left, click `Compile`, and preview PDF on the right
-- Ink: draw on the canvas (world ink) or inside an ink node; `New Ink Node` creates another; `Clear Ink` clears world ink
-
-### Verify Markdown/LaTeX in a text node
-
-- Double-click a text node (or press `Enter`) to edit.
-- Type Markdown plus math delimiters:
-  - Inline: `\(e^{i\pi}+1=0\)`
-  - Display: `\[\int_0^1 x^2 dx = \frac{1}{3}\]`
-
-## API keys
-
-For local dev, create `graphchatv1/.env.local`:
+macOS:
 
 ```bash
-OPENAI_API_KEY=...
-GEMINI_API_KEY=...
-XAI_API_KEY=...
-ANTHROPIC_API_KEY=...
+npm run dist:mac
 ```
 
-In desktop mode you can also set provider keys in-app:
+Installers are currently unsigned.
 
-- `Settings -> Models -> API keys`
-- Keys saved there override `.env.local` values
+## Data and Git Safety
 
-## Desktop data location
+- Personal chats live in GraphChat storage and `conversation-context`, not Git.
+- Do not stage generated `conversation-context` files.
+- Do not overwrite or reset a dirty worktree.
+- Do not rewrite GraphChatV1 source storage.
+- Before storage migrations, close both applications and create a recoverable
+  backup.
+- Imported thread refreshes and migrations should be idempotent.
+- Preserve unrelated user changes.
 
-In desktop mode, open `Settings -> Data -> Storage location` to:
+## Known Limitations and Next Work
 
-- Choose a custom location for GraphChat-managed data (workspace/chats/attachments/payloads)
-- Optionally move existing data when switching location
-- Reset back to the default location
+These are useful future priorities, not claims of implemented behavior:
 
-## Build installers
+1. Formalize multi-thread metadata for graphs containing several native forks.
+2. Add broader automated importer and branch-protocol fixtures.
+3. Define refresh/conflict behavior when another Codex client changes a thread
+   while GraphChat is open.
+4. Render richer Codex events such as tool calls, command output, file changes,
+   plans, and statuses.
+5. Add native thread rename/archive lifecycle actions.
+6. Send supported files and images to Codex. Current GraphChat generation is
+   primarily text-only.
+7. Test Drive sync with imported raw payloads and multi-thread graphs.
+8. Define mobile continuation through a remote runtime or desktop relay.
+9. Continue Windows testing for authentication, binary discovery, storage paths,
+   migration, and packaging.
+10. Replace remaining inherited API-provider assumptions as Codex becomes the
+    complete primary backend.
 
-```bash
-cd graphchatv1
-npm install
-npm run dist:mac   # builds .dmg on macOS
-npm run dist:win   # builds NSIS .exe installer
-# optional: remove old artifacts first
-npm run dist:mac:fresh
-npm run dist:win:fresh
-# verify packaged artifacts before sharing
-npm run release:verify
-# copy only publishable installers to release/public
-npm run release:collect
-```
+## Orientation Map
 
-Artifacts are written to `release/`.
+- `electron/main.cjs`: Electron identity, windows, desktop services.
+- `electron/codex/process-manager.cjs`: App Server lifecycle and turn protocol.
+- `electron/codex/ipc-handlers.cjs`: Codex IPC surface.
+- `electron/codex/json-rpc-client.cjs`: JSON-RPC transport.
+- `electron/storage.cjs`: managed storage and sync.
+- `electron/conversation-context-storage.cjs`: Markdown/context projection.
+- `electron/preload.cjs`: renderer bridge.
+- `scripts/import-graphchatv1-chat.cjs`: direct legacy storage migration.
+- `src/App.tsx`: application orchestration and persistence.
+- `src/engine/WorldEngine.ts`: graph/node interaction model.
+- `src/model/chat.ts`: persisted graph node types.
+- `src/codex/threadImport.ts`: official Codex thread import/refresh.
+- `src/codex/legacyHistory.ts`: legacy root-to-node history construction.
+- `src/components/CodexThreadBrowserModal.tsx`: native thread browser.
+- `src/storage/persistence.ts`: renderer persistence API.
 
-Notes:
-
-- These builds are unsigned by default (good for local testing, not public distribution)
-- Packaging requires network access on first run so `electron-builder` can fetch Electron binaries
-- `release:verify` scans `dist/` + `release/` for secret-like tokens and local absolute paths
-- `release:collect` stages only `.dmg` / `.exe` installers into `release/public`
+When fixing a bug, inspect the existing implementation, make the change, and
+verify it. Do not stop at a proposal when the repository and local environment
+contain enough information to act safely.
