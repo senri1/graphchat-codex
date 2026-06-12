@@ -58,6 +58,30 @@ export type CodexEvent = {
   completedAtMs?: number;
 };
 
+export type CodexTimelineItem =
+  | {
+      id: string;
+      kind: 'agent_message';
+      status: 'in_progress' | 'completed';
+      text: string;
+      phase?: 'commentary' | 'final_answer' | null;
+      startedAtMs?: number;
+      completedAtMs?: number;
+    }
+  | {
+      id: string;
+      kind: 'reasoning';
+      status: 'in_progress' | 'completed';
+      summary: ThinkingSummaryChunk[];
+      startedAtMs?: number;
+      completedAtMs?: number;
+    }
+  | {
+      id: string;
+      kind: 'event';
+      event: CodexEvent;
+    };
+
 export type ChatLlmTask = {
   provider: string;
   kind: string;
@@ -146,6 +170,8 @@ export type ChatNode =
       canonicalMessage?: CanonicalAssistantMessage;
       canonicalMeta?: unknown;
       codexRef?: CodexConversationRef;
+      codexTimeline?: CodexTimelineItem[];
+      expandedCodexItems?: Record<string, boolean>;
       codexEvents?: CodexEvent[];
       expandedCodexEvents?: Record<string, boolean>;
       thinkingSummary?: ThinkingSummaryChunk[];

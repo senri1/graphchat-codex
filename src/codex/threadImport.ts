@@ -1,6 +1,10 @@
 import type { WorldEngineChatState } from '../engine/WorldEngine';
 import type { ChatNode, CodexConversationRef, ThinkingSummaryChunk } from '../model/chat';
-import { codexEventsFromThreadItems } from './events.ts';
+import {
+  codexTimelineFromThreadItems,
+  portableAssistantTextFromCodexTimeline,
+  thinkingSummaryFromCodexTimeline,
+} from './timeline.ts';
 
 export type CodexThreadSummary = {
   id: string;
@@ -96,6 +100,8 @@ function assistantMessagesForTurn(turn: CodexThreadTurn): Array<{ text: string; 
 }
 
 function assistantTextForTurn(turn: CodexThreadTurn): string {
+  const timelineText = portableAssistantTextFromCodexTimeline(codexTimelineFromThreadItems(turn.items));
+  if (timelineText) return timelineText;
   const messages = assistantMessagesForTurn(turn);
   const finals = messages.filter((message) => message.phase === 'final_answer');
   const selected = finals.length ? finals : messages;
@@ -108,6 +114,8 @@ function assistantTextForTurn(turn: CodexThreadTurn): string {
 }
 
 function reasoningForTurn(turn: CodexThreadTurn): ThinkingSummaryChunk[] | undefined {
+  const timelineSummary = thinkingSummaryFromCodexTimeline(codexTimelineFromThreadItems(turn.items));
+  if (timelineSummary?.length) return timelineSummary;
   const summaries = (Array.isArray(turn.items) ? turn.items : [])
     .filter((item) => item?.type === 'reasoning')
     .flatMap((item) => (Array.isArray(item?.summary) ? item.summary : []))
@@ -134,6 +142,7 @@ function nodeWithPreservedRect(next: ChatNode, previous: ChatNode | null): ChatN
       title: previous.title || next.title,
       modelId: previous.modelId ?? next.modelId,
       codexRef: previous.codexRef ? { ...next.codexRef, ...previous.codexRef } : next.codexRef,
+      expandedCodexItems: previous.expandedCodexItems,
       expandedCodexEvents: previous.expandedCodexEvents,
     };
   }
@@ -203,9 +212,9 @@ export function mergeCodexThreadIntoChat(
 
     const userText = userTextForTurn(turn);
     const assistantText = assistantTextForTurn(turn);
-    const codexEvents = codexEventsFromThreadItems(turn.items);
+    const codexTimeline = codexTimelineFromThreadItems(turn.items);
     const userHeight = estimatedHeight(userText, 'user');
-    const assistantHeight = estimatedHeight(assistantText, 'assistant', codexEvents?.length ?? 0);
+    const assistantHeight = estimatedHeight(assistantText, 'assistant', codexTimeline?.length ?? 0);
     const codexRef: CodexConversationRef = {
       threadId,
       turnId,
@@ -248,7 +257,7 @@ export function mergeCodexThreadIntoChat(
       },
       apiResponseKey: responseKey,
       codexRef,
-      codexEvents,
+      codexTimeline,
       thinkingSummary: reasoningForTurn(turn),
       summaryExpanded: false,
     };

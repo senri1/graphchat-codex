@@ -61,7 +61,7 @@ import type {
   ChatAttachment,
   ChatNode,
   CodexConversationRef,
-  CodexEvent,
+  CodexTimelineItem,
   InkStroke,
   ThinkingSummaryChunk,
 } from './model/chat';
@@ -133,7 +133,11 @@ import {
   type CodexThreadLinkOrigin,
   type CodexThreadLinks,
 } from './codex/threadLinks';
-import { applyCodexEventNotification } from './codex/events';
+import {
+  applyCodexTimelineNotification,
+  portableAssistantTextFromCodexTimeline,
+  thinkingSummaryFromCodexTimeline,
+} from './codex/timeline';
 
 type ChatTurnMeta = {
   id: string;
@@ -230,7 +234,7 @@ type GenerationJob = {
   codexForkedFromThreadId?: string | null;
   codexForkedFromTurnId?: string | null;
   codexThreadOrigin?: CodexThreadLinkOrigin;
-  codexEvents?: CodexEvent[];
+  codexTimeline?: CodexTimelineItem[];
 };
 
 function normalizeCodexConversationRef(value: unknown): CodexConversationRef | null {
@@ -4792,7 +4796,7 @@ export default function App() {
       codexForkedFromThreadId: null,
       codexForkedFromTurnId: null,
       codexThreadOrigin: legacyHistory.length ? 'legacy' : 'created',
-      codexEvents: [],
+      codexTimeline: [],
     };
 
     generationJobsByAssistantIdRef.current.set(job.assistantNodeId, job);
@@ -4802,6 +4806,7 @@ export default function App() {
       llmParams,
       llmError: null,
       llmTask: { provider: 'codex', kind: 'turn', cancelable: true },
+      codexTimeline: undefined,
       codexEvents: undefined,
     });
     if (activeChatIdRef.current === args.chatId) {
@@ -4812,6 +4817,7 @@ export default function App() {
         llmError: null,
         llmTask: { provider: 'codex', kind: 'turn', cancelable: true },
       });
+      engineRef.current?.setTextNodeCodexTimeline(args.assistantNodeId, undefined);
       engineRef.current?.setTextNodeCodexEvents(args.assistantNodeId, undefined);
     }
     schedulePersistSoon();
@@ -4920,39 +4926,36 @@ export default function App() {
 
       const method = String(event.method ?? '');
       const params = event.params ?? {};
-      const nextCodexEvents = applyCodexEventNotification(job.codexEvents, method, params);
-      if (nextCodexEvents !== job.codexEvents) {
-        job.codexEvents = nextCodexEvents;
-        updateStoredTextNode(job.chatId, job.assistantNodeId, { codexEvents: nextCodexEvents });
+      const previousTimeline = job.codexTimeline;
+      const nextTimeline = applyCodexTimelineNotification(previousTimeline, method, params);
+      if (nextTimeline !== previousTimeline) {
+        job.codexTimeline = nextTimeline;
+        updateStoredTextNode(job.chatId, job.assistantNodeId, { codexTimeline: nextTimeline });
         if (activeChatIdRef.current === job.chatId) {
-          engineRef.current?.setTextNodeCodexEvents(job.assistantNodeId, nextCodexEvents);
+          engineRef.current?.setTextNodeCodexTimeline(job.assistantNodeId, nextTimeline);
         }
         schedulePersistSoon();
       }
-      if (method === 'item/agentMessage/delta') {
-        const delta = typeof params.delta === 'string' ? params.delta : '';
-        if (!delta) return;
-        job.fullText += delta;
+      const isAgentMessageUpdate =
+        method === 'item/agentMessage/delta' ||
+        ((method === 'item/started' || method === 'item/completed') && params.item?.type === 'agentMessage');
+      if (isAgentMessageUpdate) {
+        job.fullText = portableAssistantTextFromCodexTimeline(nextTimeline);
         scheduleJobFlush(job);
         return;
       }
-      if (method === 'item/completed' && params.item?.type === 'agentMessage') {
-        const text = typeof params.item?.text === 'string' ? params.item.text : '';
-        if (text && text.length >= job.fullText.length) {
-          job.fullText = text;
-          scheduleJobFlush(job);
-        }
-        return;
-      }
-      if (method === 'item/reasoning/summaryTextDelta') {
-        const delta = typeof params.delta === 'string' ? params.delta : '';
-        if (!delta) return;
-        const current = job.thinkingSummary[0] ?? { summaryIndex: 0, text: '', done: false };
-        const next = [{ ...current, text: current.text + delta, done: false }];
-        job.thinkingSummary = next;
-        updateStoredTextNode(job.chatId, job.assistantNodeId, { thinkingSummary: next });
+      const isReasoningUpdate =
+        method === 'item/reasoning/summaryPartAdded' ||
+        method === 'item/reasoning/summaryTextDelta' ||
+        ((method === 'item/started' || method === 'item/completed') && params.item?.type === 'reasoning');
+      if (isReasoningUpdate) {
+        const nextSummary = thinkingSummaryFromCodexTimeline(nextTimeline) ?? [];
+        job.thinkingSummary = nextSummary;
+        updateStoredTextNode(job.chatId, job.assistantNodeId, {
+          thinkingSummary: nextSummary.length ? nextSummary : undefined,
+        });
         if (activeChatIdRef.current === job.chatId) {
-          engineRef.current?.setTextNodeThinkingSummary(job.assistantNodeId, next);
+          engineRef.current?.setTextNodeThinkingSummary(job.assistantNodeId, nextSummary);
         }
         return;
       }

@@ -363,3 +363,7 @@ export function normalizeCodexEvents(value: unknown): CodexEvent[] | undefined {
     .filter((event): event is CodexEvent => Boolean(event));
   return events.length ? events : undefined;
 }
+
+export function normalizeCodexEvent(value: unknown): CodexEvent | null {
+  return normalizeCodexEvents([value])?.[0] ?? null;
+}

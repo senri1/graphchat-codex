@@ -22,6 +22,7 @@ import type { PDFPageProxy, PageViewport } from 'pdfjs-dist';
 import { loadPdfDocument } from './pdf/pdfjs';
 import { getAttachment as getStoredAttachment } from '../storage/attachments';
 import { normalizeCodexEvents } from '../codex/events';
+import { normalizeCodexTimeline } from '../codex/timeline';
 import type {
   CanonicalAssistantMessage,
   ChatAttachment,
@@ -31,6 +32,7 @@ import type {
   ChatNode,
   CodexConversationRef,
   CodexEvent,
+  CodexTimelineItem,
   InkPoint,
   InkStroke,
   ThinkingSummaryChunk,
@@ -405,6 +407,8 @@ type TextNode = DemoNodeBase & {
   canonicalMessage?: CanonicalAssistantMessage;
   canonicalMeta?: unknown;
   codexRef?: CodexConversationRef;
+  codexTimeline?: CodexTimelineItem[];
+  expandedCodexItems?: Record<string, boolean>;
   codexEvents?: CodexEvent[];
   expandedCodexEvents?: Record<string, boolean>;
   thinkingSummary?: ThinkingSummaryChunk[];
@@ -1198,6 +1202,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           canonicalMessage: n.canonicalMessage,
           canonicalMeta: n.canonicalMeta,
           codexRef: n.codexRef,
+          codexTimeline: n.codexTimeline,
+          expandedCodexItems: n.expandedCodexItems,
           codexEvents: n.codexEvents,
           expandedCodexEvents: n.expandedCodexEvents,
           thinkingSummary: n.thinkingSummary,
@@ -1416,6 +1422,17 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           }
           return out.length ? out : undefined;
         })();
+        const codexTimeline = normalizeCodexTimeline((n as any)?.codexTimeline);
+        const expandedCodexItems = (() => {
+          const raw = (n as any)?.expandedCodexItems;
+          if (!raw || typeof raw !== 'object') return undefined;
+          const out: Record<string, boolean> = {};
+          for (const [id, expanded] of Object.entries(raw as Record<string, unknown>)) {
+            const key = String(id ?? '').trim();
+            if (key && expanded) out[key] = true;
+          }
+          return Object.keys(out).length ? out : undefined;
+        })();
         const codexEvents = normalizeCodexEvents((n as any)?.codexEvents);
         const expandedCodexEvents = (() => {
           const raw = (n as any)?.expandedCodexEvents;
@@ -1560,6 +1577,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           canonicalMessage,
           canonicalMeta: (n as any)?.canonicalMeta,
           codexRef,
+          codexTimeline,
+          expandedCodexItems,
           codexEvents,
           expandedCodexEvents,
           thinkingSummary,
@@ -5226,6 +5245,16 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.requestRender();
   }
 
+  setTextNodeCodexTimeline(nodeId: string, next: CodexTimelineItem[] | null | undefined): void {
+    const node = this.nodes.find((item): item is TextNode => item.kind === 'text' && item.id === nodeId);
+    if (!node) return;
+    node.codexTimeline = Array.isArray(next) && next.length ? next : undefined;
+    if (!node.codexTimeline) node.expandedCodexItems = undefined;
+    this.recomputeTextNodeDisplayHash(node);
+    if (node.author === 'assistant' && node.isGenerating) this.scheduleTextNodeStreamingAutoGrow(node.id);
+    this.requestRender();
+  }
+
   setTextNodeCodexEvents(nodeId: string, next: CodexEvent[] | null | undefined): void {
     const node = this.nodes.find((item): item is TextNode => item.kind === 'text' && item.id === nodeId);
     if (!node) return;
@@ -5236,16 +5265,30 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.requestRender();
   }
 
-  private toggleCodexEventExpanded(node: TextNode, eventIdRaw: string): boolean {
-    const eventId = String(eventIdRaw ?? '').trim();
-    if (!eventId) return false;
-    const event = node.codexEvents?.find((entry) => entry.id === eventId);
-    if (!event || !this.codexEventHasDetails(event)) return false;
+  private codexTimelineItemHasDetails(item: CodexTimelineItem): boolean {
+    if (item.kind === 'event') return this.codexEventHasDetails(item.event);
+    if (item.kind === 'reasoning') return item.summary.some((part) => Boolean(part.text.trim()));
+    return false;
+  }
 
-    const next = { ...(node.expandedCodexEvents ?? {}) };
-    if (next[eventId]) delete next[eventId];
-    else next[eventId] = true;
-    node.expandedCodexEvents = Object.keys(next).length ? next : undefined;
+  private toggleCodexItemExpanded(node: TextNode, itemIdRaw: string): boolean {
+    const itemId = String(itemIdRaw ?? '').trim();
+    if (!itemId) return false;
+    const timelineItem = node.codexTimeline?.find((entry) => entry.id === itemId);
+    if (timelineItem) {
+      if (!this.codexTimelineItemHasDetails(timelineItem)) return false;
+      const next = { ...(node.expandedCodexItems ?? {}) };
+      if (next[itemId]) delete next[itemId];
+      else next[itemId] = true;
+      node.expandedCodexItems = Object.keys(next).length ? next : undefined;
+    } else {
+      const event = node.codexEvents?.find((entry) => entry.id === itemId);
+      if (!event || !this.codexEventHasDetails(event)) return false;
+      const next = { ...(node.expandedCodexEvents ?? {}) };
+      if (next[itemId]) delete next[itemId];
+      else next[itemId] = true;
+      node.expandedCodexEvents = Object.keys(next).length ? next : undefined;
+    }
     this.recomputeTextNodeDisplayHash(node);
     this.textRasterGeneration += 1;
     const contentRect = this.textContentRect(node.rect);
@@ -5832,6 +5875,14 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     }
 
     if (node.author === 'assistant') {
+      const codexTimeline = Array.isArray(node.codexTimeline) ? node.codexTimeline : [];
+      for (const item of codexTimeline) parts.push(`timeline:${JSON.stringify(item)}`);
+      const expandedCodexItemIds = Object.keys(node.expandedCodexItems ?? {})
+        .filter((id) => Boolean(node.expandedCodexItems?.[id]))
+        .sort()
+        .join(',');
+      parts.push(`timelineexp:${expandedCodexItemIds}`);
+
       const codexEvents = Array.isArray(node.codexEvents) ? node.codexEvents : [];
       for (const event of codexEvents) parts.push(`codex:${JSON.stringify(event)}`);
       const expandedCodexEventIds = Object.keys(node.expandedCodexEvents ?? {})
@@ -6350,107 +6401,189 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     return Boolean(event.cwd || event.path || Number.isFinite(event.durationMs) || Number.isFinite(event.exitCode));
   }
 
+  private renderCodexEventHtml(event: CodexEvent, expanded: boolean): string {
+    const hasDetails = this.codexEventHasDetails(event);
+    const muted = this.nodeTextFillStyle(0.62);
+    const secondary = this.nodeTextFillStyle(0.84);
+    const status = event.status ?? 'completed';
+    const statusColor =
+      status === 'failed'
+        ? 'rgba(248,113,113,0.96)'
+        : status === 'declined'
+          ? 'rgba(251,191,36,0.94)'
+          : status === 'in_progress'
+            ? 'rgba(96,165,250,0.96)'
+            : 'rgba(74,222,128,0.94)';
+    const statusGlyph = status === 'failed' ? '×' : status === 'declined' ? '−' : status === 'in_progress' ? '◌' : '✓';
+    const detailToggle = hasDetails ? ` data-gcv1-codex-event-toggle="${escapeHtml(event.id)}"` : '';
+    const cursor = hasDetails ? 'cursor:pointer;' : '';
+    const chevron = hasDetails ? (expanded ? '▾' : '▸') : '';
+    const parts: string[] = [];
+
+    parts.push(
+      `<div${detailToggle} style="border:1px solid rgba(255,255,255,0.10);border-radius:7px;` +
+        `background:rgba(0,0,0,0.14);overflow:hidden;${cursor}">`,
+    );
+    parts.push(
+      '<div style="min-height:30px;padding:6px 8px;display:flex;align-items:center;gap:8px;box-sizing:border-box;">' +
+        `<span aria-hidden="true" style="width:16px;flex:0 0 16px;text-align:center;color:${statusColor};font-weight:700;">${statusGlyph}</span>` +
+        `<span style="flex:1;min-width:0;color:${secondary};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(event.title)}</span>` +
+        (event.subtitle
+          ? `<span style="max-width:36%;color:${muted};font-size:0.82em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(event.subtitle)}</span>`
+          : '') +
+        (Number.isFinite(event.durationMs)
+          ? `<span style="color:${muted};font-size:0.78em;white-space:nowrap;">${escapeHtml(this.formatCodexDuration(event.durationMs as number))}</span>`
+          : '') +
+        (hasDetails
+          ? `<span aria-hidden="true" style="width:12px;flex:0 0 12px;color:${muted};text-align:center;">${chevron}</span>`
+          : '') +
+        '</div>',
+    );
+
+    if (expanded && hasDetails) {
+      parts.push('<div style="border-top:1px solid rgba(255,255,255,0.08);padding:8px 10px;">');
+      if (event.cwd) {
+        parts.push(`<div style="margin:0 0 6px;color:${muted};font-size:0.8em;">Working directory: ${escapeHtml(event.cwd)}</div>`);
+      }
+      if (event.path) {
+        parts.push(`<div style="margin:0 0 6px;color:${muted};font-size:0.8em;">${escapeHtml(event.path)}</div>`);
+      }
+      if (Array.isArray(event.files)) {
+        for (const file of event.files) {
+          parts.push(
+            `<div style="margin:0 0 6px;color:${secondary};font-size:0.86em;">${escapeHtml(file.kind)} ${escapeHtml(file.path)}</div>`,
+          );
+          if (file.diff) {
+            parts.push(
+              '<pre style="margin:0 0 8px;padding:8px;max-height:240px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+                'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+                escapeHtml(file.diff) +
+                '</pre>',
+            );
+          }
+        }
+      }
+      if (event.arguments !== undefined) {
+        let argsText = '';
+        try {
+          argsText = JSON.stringify(event.arguments, null, 2);
+        } catch {
+          argsText = String(event.arguments);
+        }
+        if (argsText) {
+          parts.push(
+            '<pre style="margin:0 0 8px;padding:8px;max-height:180px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+              'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+              escapeHtml(argsText) +
+              '</pre>',
+          );
+        }
+      }
+      if (event.detail) {
+        parts.push(
+          '<pre style="margin:0;padding:8px;max-height:280px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+            'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+            escapeHtml(event.detail) +
+            '</pre>',
+        );
+      }
+      if (Number.isFinite(event.exitCode)) {
+        parts.push(`<div style="margin:6px 0 0;color:${muted};font-size:0.8em;">Exit code: ${event.exitCode}</div>`);
+      }
+      parts.push('</div>');
+    }
+    parts.push('</div>');
+    return parts.join('');
+  }
+
   private renderCodexEventsHtml(node: TextNode): string {
     const events = Array.isArray(node.codexEvents) ? node.codexEvents : [];
     if (events.length === 0) return '';
 
     const parts: string[] = [];
-    const muted = this.nodeTextFillStyle(0.62);
-    const secondary = this.nodeTextFillStyle(0.84);
     parts.push('<div style="margin:8px 0 10px;display:flex;flex-direction:column;gap:4px;">');
 
     for (const event of events) {
-      const hasDetails = this.codexEventHasDetails(event);
-      const expanded = hasDetails && Boolean(node.expandedCodexEvents?.[event.id]);
-      const status = event.status ?? 'completed';
-      const statusColor =
-        status === 'failed'
-          ? 'rgba(248,113,113,0.96)'
-          : status === 'declined'
-            ? 'rgba(251,191,36,0.94)'
-            : status === 'in_progress'
-              ? 'rgba(96,165,250,0.96)'
-              : 'rgba(74,222,128,0.94)';
-      const statusGlyph = status === 'failed' ? '×' : status === 'declined' ? '−' : status === 'in_progress' ? '◌' : '✓';
-      const detailToggle = hasDetails ? ` data-gcv1-codex-event-toggle="${escapeHtml(event.id)}"` : '';
-      const cursor = hasDetails ? 'cursor:pointer;' : '';
-      const chevron = hasDetails ? (expanded ? '▾' : '▸') : '';
+      parts.push(this.renderCodexEventHtml(event, Boolean(node.expandedCodexEvents?.[event.id])));
+    }
 
-      parts.push(
-        `<div${detailToggle} style="border:1px solid rgba(255,255,255,0.10);border-radius:7px;` +
-          `background:rgba(0,0,0,0.14);overflow:hidden;${cursor}">`,
-      );
-      parts.push(
-        '<div style="min-height:30px;padding:6px 8px;display:flex;align-items:center;gap:8px;box-sizing:border-box;">' +
-          `<span aria-hidden="true" style="width:16px;flex:0 0 16px;text-align:center;color:${statusColor};font-weight:700;">${statusGlyph}</span>` +
-          `<span style="flex:1;min-width:0;color:${secondary};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(event.title)}</span>` +
-          (event.subtitle
-            ? `<span style="max-width:36%;color:${muted};font-size:0.82em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(event.subtitle)}</span>`
-            : '') +
-          (Number.isFinite(event.durationMs)
-            ? `<span style="color:${muted};font-size:0.78em;white-space:nowrap;">${escapeHtml(this.formatCodexDuration(event.durationMs as number))}</span>`
-            : '') +
-          (hasDetails
-            ? `<span aria-hidden="true" style="width:12px;flex:0 0 12px;color:${muted};text-align:center;">${chevron}</span>`
-            : '') +
-          '</div>',
-      );
+    parts.push('</div>');
+    return parts.join('');
+  }
 
-      if (expanded) {
-        parts.push('<div style="border-top:1px solid rgba(255,255,255,0.08);padding:8px 10px;">');
-        if (event.cwd) {
-          parts.push(`<div style="margin:0 0 6px;color:${muted};font-size:0.8em;">Working directory: ${escapeHtml(event.cwd)}</div>`);
-        }
-        if (event.path) {
-          parts.push(`<div style="margin:0 0 6px;color:${muted};font-size:0.8em;">${escapeHtml(event.path)}</div>`);
-        }
-        if (Array.isArray(event.files)) {
-          for (const file of event.files) {
-            parts.push(
-              `<div style="margin:0 0 6px;color:${secondary};font-size:0.86em;">${escapeHtml(file.kind)} ${escapeHtml(file.path)}</div>`,
-            );
-            if (file.diff) {
-              parts.push(
-                '<pre style="margin:0 0 8px;padding:8px;max-height:240px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
-                  'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
-                  escapeHtml(file.diff) +
-                  '</pre>',
-              );
-            }
-          }
-        }
-        if (event.arguments !== undefined) {
-          let argsText = '';
-          try {
-            argsText = JSON.stringify(event.arguments, null, 2);
-          } catch {
-            argsText = String(event.arguments);
-          }
-          if (argsText) {
-            parts.push(
-              '<pre style="margin:0 0 8px;padding:8px;max-height:180px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
-                'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
-                escapeHtml(argsText) +
-                '</pre>',
-            );
-          }
-        }
-        if (event.detail) {
-          parts.push(
-            '<pre style="margin:0;padding:8px;max-height:280px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
-              'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
-              escapeHtml(event.detail) +
-              '</pre>',
-          );
-        }
-        if (Number.isFinite(event.exitCode)) {
-          parts.push(`<div style="margin:6px 0 0;color:${muted};font-size:0.8em;">Exit code: ${event.exitCode}</div>`);
-        }
-        parts.push('</div>');
+  private renderCodexReasoningItemHtml(
+    item: Extract<CodexTimelineItem, { kind: 'reasoning' }>,
+    expanded: boolean,
+  ): string {
+    const muted = this.nodeTextFillStyle(0.58);
+    const secondary = this.nodeTextFillStyle(0.82);
+    const summaries = item.summary
+      .slice()
+      .sort((a, b) => a.summaryIndex - b.summaryIndex)
+      .filter((part) => Boolean(part.text.trim()));
+    const hasDetails = summaries.length > 0;
+    const showBody = hasDetails && (item.status === 'in_progress' || expanded);
+    const firstLine = hasDetails ? summarizeFirstLine(summaries[0]?.text ?? '') : '';
+    const statusColor = item.status === 'in_progress' ? 'rgba(96,165,250,0.96)' : muted;
+    const statusGlyph = item.status === 'in_progress' ? '◌' : '✓';
+    const chevron = hasDetails ? (showBody ? '▾' : '▸') : '';
+    const toggle = hasDetails ? ` data-gcv1-codex-event-toggle="${escapeHtml(item.id)}"` : '';
+    const parts: string[] = [];
+
+    parts.push(
+      `<div${toggle} style="border:1px solid rgba(255,255,255,0.08);border-radius:7px;` +
+        `background:rgba(255,255,255,0.025);overflow:hidden;${hasDetails ? 'cursor:pointer;' : ''}">`,
+    );
+    parts.push(
+      '<div style="min-height:30px;padding:6px 8px;display:flex;align-items:center;gap:8px;box-sizing:border-box;">' +
+        `<span aria-hidden="true" style="width:16px;flex:0 0 16px;text-align:center;color:${statusColor};font-weight:700;">${statusGlyph}</span>` +
+        `<span style="color:${secondary};white-space:nowrap;">Reasoning</span>` +
+        (firstLine
+          ? `<span style="flex:1;min-width:0;color:${muted};font-size:0.86em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(firstLine)}</span>`
+          : '<span style="flex:1;"></span>') +
+        (hasDetails
+          ? `<span aria-hidden="true" style="width:12px;flex:0 0 12px;color:${muted};text-align:center;">${chevron}</span>`
+          : '') +
+        '</div>',
+    );
+
+    if (showBody) {
+      parts.push(`<div style="border-top:1px solid rgba(255,255,255,0.07);padding:7px 10px;color:${muted};font-size:0.9em;">`);
+      for (const part of summaries) {
+        parts.push(`<div style="white-space:pre-wrap;margin:2px 0;">${escapeHtml(stripStrong(part.text))}</div>`);
       }
       parts.push('</div>');
     }
+    parts.push('</div>');
+    return parts.join('');
+  }
 
+  private renderCodexTimelineHtml(node: TextNode): string {
+    const timeline = Array.isArray(node.codexTimeline) ? node.codexTimeline : [];
+    if (timeline.length === 0) return '';
+
+    const muted = this.nodeTextFillStyle(0.68);
+    const parts: string[] = [];
+    parts.push('<div style="margin:8px 0 10px;display:flex;flex-direction:column;gap:5px;">');
+    for (const item of timeline) {
+      if (item.kind === 'event') {
+        parts.push(this.renderCodexEventHtml(item.event, Boolean(node.expandedCodexItems?.[item.id])));
+        continue;
+      }
+      if (item.kind === 'reasoning') {
+        parts.push(this.renderCodexReasoningItemHtml(item, Boolean(node.expandedCodexItems?.[item.id])));
+        continue;
+      }
+      if (!item.text.trim()) continue;
+      const commentary = item.phase === 'commentary';
+      parts.push(
+        `<div style="margin:${commentary ? '3px 2px' : '8px 0'};` +
+          (commentary
+            ? `padding:2px 0 2px 10px;border-left:2px solid rgba(255,255,255,0.12);color:${muted};font-size:0.93em;`
+            : '') +
+          `"><div class="gc-codex-message">${renderMarkdownMath(item.text)}</div></div>`,
+      );
+    }
     parts.push('</div>');
     return parts.join('');
   }
@@ -6471,6 +6604,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const quietTextColor = this.nodeTextFillStyle(0.45);
     const content = typeof node.content === 'string' ? node.content : String(node.content ?? '');
     const hasContent = Boolean(content.trim());
+    const codexTimeline = isAssistant && Array.isArray(node.codexTimeline) ? node.codexTimeline : [];
+    const timelineHasMessageText = codexTimeline.some(
+      (item) => item.kind === 'agent_message' && Boolean(item.text.trim()),
+    );
     const parts: string[] = [];
 
     if (textFormat === 'latex') {
@@ -6546,71 +6683,75 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       return parts.join('');
     }
 
-    if (node.isGenerating && !hasContent) {
+    if (node.isGenerating && !hasContent && codexTimeline.length === 0) {
       parts.push(`<div style="margin:8px 0 6px;color:${mutedTextColor};font-size:0.93em;">Thinking...</div>`);
     }
 
     if (isAssistant) {
-      const streaming = Array.isArray(node.thinkingSummary) ? node.thinkingSummary : [];
-      const finalBlocks = this.getFinalReasoningBlocks(node);
-      const showSection = (streaming.length > 0) || (finalBlocks.length > 0);
-      const showToggle = !node.isGenerating && finalBlocks.length > 0;
-      const showBody =
-        (node.isGenerating && streaming.length > 0) ||
-        (!node.isGenerating && Boolean(node.summaryExpanded) && finalBlocks.length > 0);
+      if (codexTimeline.length > 0) {
+        parts.push(this.renderCodexTimelineHtml(node));
+      } else {
+        const streaming = Array.isArray(node.thinkingSummary) ? node.thinkingSummary : [];
+        const finalBlocks = this.getFinalReasoningBlocks(node);
+        const showSection = (streaming.length > 0) || (finalBlocks.length > 0);
+        const showToggle = !node.isGenerating && finalBlocks.length > 0;
+        const showBody =
+          (node.isGenerating && streaming.length > 0) ||
+          (!node.isGenerating && Boolean(node.summaryExpanded) && finalBlocks.length > 0);
 
-      if (showSection) {
-        if (showToggle) {
-          const chevron = node.summaryExpanded ? '▾' : '▸';
-          parts.push(
-            `<div data-gcv1-summary-toggle="1" style="margin:8px 0 4px;display:inline-flex;align-items:center;gap:6px;` +
-              `color:${mutedTextColor};font-size:0.93em;cursor:pointer;user-select:none;">` +
-              `<span aria-hidden="true" style="width:1em;display:inline-flex;justify-content:center;">${chevron}</span>` +
-              `<span>Thinking summary</span>` +
-              `</div>`,
-          );
-        }
-
-        if (showBody) {
-          parts.push(`<div style="margin:0 0 8px;color:${mutedTextColor};font-size:0.93em;">`);
-          const rows: Array<{ summaryIndex: number; text: string; done: boolean }> = node.isGenerating
-            ? streaming.map((c) => ({ summaryIndex: c.summaryIndex ?? 0, text: c.text ?? '', done: Boolean(c.done) }))
-            : finalBlocks.map((b) => ({ summaryIndex: b.id ?? 0, text: b.text ?? '', done: true }));
-
-          for (const row of rows) {
-            const idx = row.summaryIndex ?? 0;
-            const rawText = row.text ?? '';
-            if (node.isGenerating && !row.done) {
-              parts.push(
-                `<div style="display:flex;align-items:flex-start;gap:6px;margin:2px 0;">` +
-                  `<span aria-hidden="true" style="width:1em;flex:0 0 1em;margin-top:0.15em;"></span>` +
-                  `<div style="white-space:pre-wrap;flex:1;min-width:0;">${escapeHtml(stripStrong(rawText))}</div>` +
-                  `</div>`,
-              );
-              continue;
-            }
-
-            const expanded = Boolean(node.expandedSummaryChunks?.[idx]);
-            const chevron = expanded ? '▾' : '▸';
-            const display = expanded ? stripStrong(rawText) : summarizeFirstLine(rawText);
-            const textStyle = expanded
-              ? 'white-space:pre-wrap;'
-              : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+        if (showSection) {
+          if (showToggle) {
+            const chevron = node.summaryExpanded ? '▾' : '▸';
             parts.push(
-              `<div style="display:flex;align-items:flex-start;gap:6px;margin:2px 0;">` +
-                `<span data-gcv1-summary-chunk-toggle="${idx}" aria-hidden="true" ` +
-                `style="width:1em;flex:0 0 1em;margin-top:0.15em;display:inline-flex;justify-content:center;` +
-                `color:${mutedTextColor};cursor:pointer;user-select:none;">${chevron}</span>` +
-                `<div style="${textStyle}flex:1;min-width:0;">${escapeHtml(display)}</div>` +
+              `<div data-gcv1-summary-toggle="1" style="margin:8px 0 4px;display:inline-flex;align-items:center;gap:6px;` +
+                `color:${mutedTextColor};font-size:0.93em;cursor:pointer;user-select:none;">` +
+                `<span aria-hidden="true" style="width:1em;display:inline-flex;justify-content:center;">${chevron}</span>` +
+                `<span>Thinking summary</span>` +
                 `</div>`,
             );
           }
-          parts.push('</div>');
-        }
-      }
 
-      const codexEventsHtml = this.renderCodexEventsHtml(node);
-      if (codexEventsHtml) parts.push(codexEventsHtml);
+          if (showBody) {
+            parts.push(`<div style="margin:0 0 8px;color:${mutedTextColor};font-size:0.93em;">`);
+            const rows: Array<{ summaryIndex: number; text: string; done: boolean }> = node.isGenerating
+              ? streaming.map((c) => ({ summaryIndex: c.summaryIndex ?? 0, text: c.text ?? '', done: Boolean(c.done) }))
+              : finalBlocks.map((b) => ({ summaryIndex: b.id ?? 0, text: b.text ?? '', done: true }));
+
+            for (const row of rows) {
+              const idx = row.summaryIndex ?? 0;
+              const rawText = row.text ?? '';
+              if (node.isGenerating && !row.done) {
+                parts.push(
+                  `<div style="display:flex;align-items:flex-start;gap:6px;margin:2px 0;">` +
+                    `<span aria-hidden="true" style="width:1em;flex:0 0 1em;margin-top:0.15em;"></span>` +
+                    `<div style="white-space:pre-wrap;flex:1;min-width:0;">${escapeHtml(stripStrong(rawText))}</div>` +
+                    `</div>`,
+                );
+                continue;
+              }
+
+              const expanded = Boolean(node.expandedSummaryChunks?.[idx]);
+              const chevron = expanded ? '▾' : '▸';
+              const display = expanded ? stripStrong(rawText) : summarizeFirstLine(rawText);
+              const textStyle = expanded
+                ? 'white-space:pre-wrap;'
+                : 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
+              parts.push(
+                `<div style="display:flex;align-items:flex-start;gap:6px;margin:2px 0;">` +
+                  `<span data-gcv1-summary-chunk-toggle="${idx}" aria-hidden="true" ` +
+                  `style="width:1em;flex:0 0 1em;margin-top:0.15em;display:inline-flex;justify-content:center;` +
+                  `color:${mutedTextColor};cursor:pointer;user-select:none;">${chevron}</span>` +
+                  `<div style="${textStyle}flex:1;min-width:0;">${escapeHtml(display)}</div>` +
+                  `</div>`,
+              );
+            }
+            parts.push('</div>');
+          }
+        }
+
+        const codexEventsHtml = this.renderCodexEventsHtml(node);
+        if (codexEventsHtml) parts.push(codexEventsHtml);
+      }
     }
 
     if (isUser) {
@@ -6726,7 +6867,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       parts.push('</div>');
     }
 
-    if (hasContent) {
+    if (hasContent && !timelineHasMessageText) {
       if (node.isGenerating && !isUser) {
         parts.push(`<div style="font-size:0.79em;color:${quietTextColor};margin:0 0 4px;">Streaming…</div>`);
       }
@@ -7117,7 +7258,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         if (node.author !== 'assistant') return;
 
         if (action.kind === 'codex_event_toggle') {
-          this.toggleCodexEventExpanded(node, action.eventId);
+          this.toggleCodexItemExpanded(node, action.eventId);
           return;
         }
 
@@ -10468,7 +10609,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           this.bringNodeToFront(hit.id);
 
           if (zone.kind === 'codex_event_toggle') {
-            const handled = this.toggleCodexEventExpanded(hit, zone.eventId);
+            const handled = this.toggleCodexItemExpanded(hit, zone.eventId);
             if (selectionChanged) this.emitUiState();
             if (handled) return;
           }

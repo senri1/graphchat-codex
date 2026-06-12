@@ -1,6 +1,6 @@
 # GraphChat Codex: AI Project Context
 
-Last updated: 2026-06-11
+Last updated: 2026-06-12
 
 This README is primarily operational context for AI coding agents. Read it before
 changing the repository. Verify details against the code when they affect data
@@ -62,6 +62,8 @@ The application currently supports:
 - Streaming assistant text and reasoning summaries into graph nodes.
 - Portable command, patch, plan, search, tool, agent, image, review, and
   compaction events with compact expandable rows.
+- Chronological assistant-turn timelines that interleave reasoning, tool
+  activity, commentary, and final answers in App Server item order.
 - Turn cancellation and error handling.
 - Command and file approval prompts.
 - Native continuation and branching.
@@ -114,11 +116,35 @@ Non-text and empty nodes are skipped. Consecutive nodes with the same author are
 grouped into one injected message. Provider payloads and old tool output are not
 injected.
 
+## Ordered Codex Turn Timeline
+
+Each Codex-backed assistant node may store an ordered `codexTimeline` containing
+three portable item types:
+
+- `agent_message`: commentary or final-answer text.
+- `reasoning`: one or more reasoning-summary parts.
+- `event`: normalized command, patch, plan, search, tool, agent, image, review,
+  or context-compaction activity.
+
+The array order is authoritative for display. Live notifications append an item
+at its first observed position and update it by stable `itemId`; completion must
+not move it. Imported turns preserve the App Server `turn.items` order.
+
+The plain node `content` remains a portable compatibility projection. It uses
+`final_answer` messages when available, otherwise all agent messages.
+`thinkingSummary` and the older `codexEvents` field remain compatibility
+projections/fallbacks for saved chats created before the ordered timeline.
+
+Do not reconstruct display order by grouping reasoning, events, and messages
+into separate sections. See `docs/codex-event-model.md` and
+`src/codex/timeline.ts`.
+
 Important implementation:
 
 - `electron/codex/process-manager.cjs`
 - `electron/codex/ipc-handlers.cjs`
 - `src/codex/legacyHistory.ts`
+- `src/codex/timeline.ts`
 - `src/codex/threadImport.ts`
 
 ## Node Semantics
@@ -231,6 +257,25 @@ The thread browser uses App Server `thread/list` and `thread/read`.
   becomes unavailable.
 - Refresh must remain idempotent and preserve GraphChat-only branches, layout,
   model metadata, and checkpoints.
+
+### Refreshing A Thread
+
+Refresh is currently manual:
+
+1. Open **Codex threads** from the right toolbar.
+2. Use the circular-arrow button if the thread list itself may be stale.
+3. Select the linked thread whose action says **Open / refresh**.
+
+The circular-arrow button only reloads the list with `thread/list`. Selecting
+**Open / refresh** performs `thread/read` and merges the latest thread into its
+already-linked GraphChat chat. The merge matches turns by `turnId`, adds missing
+turns, refreshes imported timeline snapshots, and preserves GraphChat-only
+nodes, branch layout, and local expansion state.
+
+There is no automatic cross-client watcher yet. If the official Codex app
+changes a thread while GraphChat is open, repeat the steps above. A successful
+merge reports the number of newly added turns or says that the thread was
+refreshed.
 
 ## Legacy GraphChatV1 Migration
 
@@ -421,17 +466,24 @@ Installers are currently unsigned.
 
 These are useful future priorities, not claims of implemented behavior:
 
-1. Define refresh/conflict behavior when another Codex client changes a thread
-   while GraphChat is open.
-2. Render richer Codex events such as tool calls, command output, file changes,
-   plans, and statuses.
-3. Add native thread rename/archive lifecycle actions.
-4. Send supported files and images to Codex. Current GraphChat generation is
-   primarily text-only.
-5. Continue Windows testing for authentication, binary discovery, storage paths,
+1. Add official-client reconciliation. Detect externally added turns, forks,
+   renames, archives, rollbacks, and changed item snapshots; merge them without
+   duplicating nodes or silently overwriting GraphChat-owned state.
+2. Add automatic or user-configurable refresh while a linked chat is open, with
+   a visible external-update indicator and clear handling for an active local
+   generation.
+3. Add a large-detail panel for long command output, diffs, tool arguments, and
+   results while retaining compact chronological rows in the graph node.
+4. Send supported files, images, and PDFs to Codex, and render image results and
+   clickable file locations. Current generation is primarily text-only.
+5. Add native thread rename and archive actions, then define how those lifecycle
+   changes map onto GraphChat chat names and visibility.
+6. Expand reconciliation tests for external forks, partial/in-progress turns,
+   failed turns, rollback, duplicate refresh, and unavailable native history.
+7. Continue Windows testing for authentication, binary discovery, storage paths,
    migration, and packaging.
-6. Replace remaining inherited API-provider assumptions as Codex becomes the
-    complete primary backend.
+8. Replace remaining inherited API-provider assumptions as Codex becomes the
+   complete primary backend.
 
 ## Orientation Map
 
@@ -446,6 +498,7 @@ These are useful future priorities, not claims of implemented behavior:
 - `src/App.tsx`: application orchestration and persistence.
 - `src/engine/WorldEngine.ts`: graph/node interaction model.
 - `src/model/chat.ts`: persisted graph node types.
+- `src/codex/timeline.ts`: ordered live/imported Codex item normalization.
 - `src/codex/threadImport.ts`: official Codex thread import/refresh.
 - `src/codex/legacyHistory.ts`: legacy root-to-node history construction.
 - `src/components/CodexThreadBrowserModal.tsx`: native thread browser.

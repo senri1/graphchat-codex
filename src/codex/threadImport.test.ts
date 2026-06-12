@@ -130,7 +130,7 @@ test('importing a fork reuses shared turn IDs and adds only the fork-specific ta
   assert.equal(assistantForTurn(fork.state.nodes, 'turn-c')?.codexRef?.forkedFromThreadId, 'thread-1');
 });
 
-test('imports portable Codex tool events alongside assistant text', () => {
+test('imports portable Codex items in their original turn order', () => {
   const imported = mergeCodexThreadIntoChat(
     null,
     thread({
@@ -142,6 +142,12 @@ test('imports portable Codex tool events alongside assistant text', () => {
           items: [
             { type: 'userMessage', content: [{ type: 'text', text: 'Run tests' }] },
             {
+              type: 'reasoning',
+              id: 'reason-1',
+              summary: ['Checking the test setup.'],
+              content: [],
+            },
+            {
               type: 'commandExecution',
               id: 'cmd-1',
               command: 'npm test',
@@ -150,7 +156,30 @@ test('imports portable Codex tool events alongside assistant text', () => {
               aggregatedOutput: 'ok',
               exitCode: 0,
             },
-            { type: 'agentMessage', text: 'Tests passed.', phase: 'final_answer' },
+            {
+              type: 'agentMessage',
+              id: 'comment-1',
+              text: 'The test suite is clean.',
+              phase: 'commentary',
+            },
+            {
+              type: 'fileChange',
+              id: 'patch-1',
+              status: 'completed',
+              changes: [
+                {
+                  path: 'src/App.tsx',
+                  kind: { type: 'update' },
+                  diff: '@@ updated',
+                },
+              ],
+            },
+            {
+              type: 'agentMessage',
+              id: 'final-1',
+              text: 'Tests passed.',
+              phase: 'final_answer',
+            },
           ],
         },
       ],
@@ -159,7 +188,16 @@ test('imports portable Codex tool events alongside assistant text', () => {
   );
 
   const assistant = assistantForTurn(imported.state.nodes, 'turn-events');
-  assert.equal(assistant?.codexEvents?.length, 1);
-  assert.equal(assistant?.codexEvents?.[0]?.kind, 'command');
-  assert.equal(assistant?.codexEvents?.[0]?.detail, 'ok');
+  assert.deepEqual(
+    assistant?.codexTimeline?.map((item) => item.id),
+    ['reason-1', 'cmd-1', 'comment-1', 'patch-1', 'final-1'],
+  );
+  assert.equal(assistant?.content, 'Tests passed.');
+  assert.equal(assistant?.codexTimeline?.[1]?.kind, 'event');
+  assert.equal(
+    assistant?.codexTimeline?.[1]?.kind === 'event'
+      ? assistant.codexTimeline[1].event.detail
+      : null,
+    'ok',
+  );
 });
