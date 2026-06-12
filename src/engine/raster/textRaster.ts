@@ -12,6 +12,7 @@ export type TextRasterResult = {
 export type TextHitZone =
   | { kind: 'summary_toggle'; left: number; top: number; width: number; height: number }
   | { kind: 'summary_chunk_toggle'; summaryIndex: number; left: number; top: number; width: number; height: number }
+  | { kind: 'codex_event_toggle'; eventId: string; left: number; top: number; width: number; height: number }
   | { kind: 'preface_context_toggle'; contextIndex: number; left: number; top: number; width: number; height: number };
 
 const DEFAULT_TEXT_COLOR = 'rgba(255,255,255,0.92)';
@@ -368,6 +369,21 @@ function measureHitZones(card: HTMLDivElement): TextHitZone[] {
       zones.push({
         kind: 'summary_chunk_toggle',
         summaryIndex: idx,
+        left: r.left - cardRect.left,
+        top: r.top - cardRect.top,
+        width: r.width,
+        height: r.height,
+      });
+    }
+
+    const codexEvents = Array.from(card.querySelectorAll('[data-gcv1-codex-event-toggle]')) as HTMLElement[];
+    for (const el of codexEvents) {
+      const eventId = (el.getAttribute('data-gcv1-codex-event-toggle') ?? '').trim();
+      if (!eventId) continue;
+      const r = el.getBoundingClientRect();
+      zones.push({
+        kind: 'codex_event_toggle',
+        eventId,
         left: r.left - cardRect.left,
         top: r.top - cardRect.top,
         width: r.width,

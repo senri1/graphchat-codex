@@ -21,6 +21,7 @@ import type { PDFDocumentProxy } from 'pdfjs-dist';
 import type { PDFPageProxy, PageViewport } from 'pdfjs-dist';
 import { loadPdfDocument } from './pdf/pdfjs';
 import { getAttachment as getStoredAttachment } from '../storage/attachments';
+import { normalizeCodexEvents } from '../codex/events';
 import type {
   CanonicalAssistantMessage,
   ChatAttachment,
@@ -29,6 +30,7 @@ import type {
   ChatLlmParams,
   ChatNode,
   CodexConversationRef,
+  CodexEvent,
   InkPoint,
   InkStroke,
   ThinkingSummaryChunk,
@@ -403,6 +405,8 @@ type TextNode = DemoNodeBase & {
   canonicalMessage?: CanonicalAssistantMessage;
   canonicalMeta?: unknown;
   codexRef?: CodexConversationRef;
+  codexEvents?: CodexEvent[];
+  expandedCodexEvents?: Record<string, boolean>;
   thinkingSummary?: ThinkingSummaryChunk[];
   summaryExpanded?: boolean;
   expandedSummaryChunks?: Record<number, boolean>;
@@ -1194,6 +1198,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           canonicalMessage: n.canonicalMessage,
           canonicalMeta: n.canonicalMeta,
           codexRef: n.codexRef,
+          codexEvents: n.codexEvents,
+          expandedCodexEvents: n.expandedCodexEvents,
           thinkingSummary: n.thinkingSummary,
           summaryExpanded: n.summaryExpanded,
           expandedSummaryChunks: n.expandedSummaryChunks,
@@ -1410,6 +1416,17 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           }
           return out.length ? out : undefined;
         })();
+        const codexEvents = normalizeCodexEvents((n as any)?.codexEvents);
+        const expandedCodexEvents = (() => {
+          const raw = (n as any)?.expandedCodexEvents;
+          if (!raw || typeof raw !== 'object') return undefined;
+          const out: Record<string, boolean> = {};
+          for (const [id, expanded] of Object.entries(raw as Record<string, unknown>)) {
+            const key = String(id ?? '').trim();
+            if (key && expanded) out[key] = true;
+          }
+          return Object.keys(out).length ? out : undefined;
+        })();
         const expandedSummaryChunks = (() => {
           const raw = (n as any)?.expandedSummaryChunks;
           if (!raw || typeof raw !== 'object') return undefined;
@@ -1543,6 +1560,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           canonicalMessage,
           canonicalMeta: (n as any)?.canonicalMeta,
           codexRef,
+          codexEvents,
+          expandedCodexEvents,
           thinkingSummary,
           summaryExpanded: Boolean((n as any)?.summaryExpanded),
           expandedSummaryChunks,
@@ -5207,6 +5226,40 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.requestRender();
   }
 
+  setTextNodeCodexEvents(nodeId: string, next: CodexEvent[] | null | undefined): void {
+    const node = this.nodes.find((item): item is TextNode => item.kind === 'text' && item.id === nodeId);
+    if (!node) return;
+    node.codexEvents = Array.isArray(next) && next.length ? next : undefined;
+    if (!node.codexEvents) node.expandedCodexEvents = undefined;
+    this.recomputeTextNodeDisplayHash(node);
+    if (node.author === 'assistant' && node.isGenerating) this.scheduleTextNodeStreamingAutoGrow(node.id);
+    this.requestRender();
+  }
+
+  private toggleCodexEventExpanded(node: TextNode, eventIdRaw: string): boolean {
+    const eventId = String(eventIdRaw ?? '').trim();
+    if (!eventId) return false;
+    const event = node.codexEvents?.find((entry) => entry.id === eventId);
+    if (!event || !this.codexEventHasDetails(event)) return false;
+
+    const next = { ...(node.expandedCodexEvents ?? {}) };
+    if (next[eventId]) delete next[eventId];
+    else next[eventId] = true;
+    node.expandedCodexEvents = Object.keys(next).length ? next : undefined;
+    this.recomputeTextNodeDisplayHash(node);
+    this.textRasterGeneration += 1;
+    const contentRect = this.textContentRect(node.rect);
+    const sig = this.textRasterSigForNode(node, contentRect).sig;
+    this.textResizeHold = { nodeId: node.id, sig, expiresAt: performance.now() + 2200 };
+    this.requestRender();
+    try {
+      this.onRequestPersist?.();
+    } catch {
+      // ignore
+    }
+    return true;
+  }
+
   setTextNodeCanonical(nodeId: string, patch: { canonicalMessage?: unknown; canonicalMeta?: unknown }): void {
     const id = nodeId;
     if (!id) return;
@@ -5779,6 +5832,14 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     }
 
     if (node.author === 'assistant') {
+      const codexEvents = Array.isArray(node.codexEvents) ? node.codexEvents : [];
+      for (const event of codexEvents) parts.push(`codex:${JSON.stringify(event)}`);
+      const expandedCodexEventIds = Object.keys(node.expandedCodexEvents ?? {})
+        .filter((id) => Boolean(node.expandedCodexEvents?.[id]))
+        .sort()
+        .join(',');
+      parts.push(`codexexp:${expandedCodexEventIds}`);
+
       const expanded = node.expandedSummaryChunks ?? {};
       const expandedKeys = Object.keys(expanded)
         .map((k) => Number(k))
@@ -6282,6 +6343,125 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     return [];
   }
 
+  private codexEventHasDetails(event: CodexEvent): boolean {
+    if (typeof event.detail === 'string' && event.detail.trim()) return true;
+    if (Array.isArray(event.files) && event.files.length > 0) return true;
+    if (event.arguments !== undefined) return true;
+    return Boolean(event.cwd || event.path || Number.isFinite(event.durationMs) || Number.isFinite(event.exitCode));
+  }
+
+  private renderCodexEventsHtml(node: TextNode): string {
+    const events = Array.isArray(node.codexEvents) ? node.codexEvents : [];
+    if (events.length === 0) return '';
+
+    const parts: string[] = [];
+    const muted = this.nodeTextFillStyle(0.62);
+    const secondary = this.nodeTextFillStyle(0.84);
+    parts.push('<div style="margin:8px 0 10px;display:flex;flex-direction:column;gap:4px;">');
+
+    for (const event of events) {
+      const hasDetails = this.codexEventHasDetails(event);
+      const expanded = hasDetails && Boolean(node.expandedCodexEvents?.[event.id]);
+      const status = event.status ?? 'completed';
+      const statusColor =
+        status === 'failed'
+          ? 'rgba(248,113,113,0.96)'
+          : status === 'declined'
+            ? 'rgba(251,191,36,0.94)'
+            : status === 'in_progress'
+              ? 'rgba(96,165,250,0.96)'
+              : 'rgba(74,222,128,0.94)';
+      const statusGlyph = status === 'failed' ? '×' : status === 'declined' ? '−' : status === 'in_progress' ? '◌' : '✓';
+      const detailToggle = hasDetails ? ` data-gcv1-codex-event-toggle="${escapeHtml(event.id)}"` : '';
+      const cursor = hasDetails ? 'cursor:pointer;' : '';
+      const chevron = hasDetails ? (expanded ? '▾' : '▸') : '';
+
+      parts.push(
+        `<div${detailToggle} style="border:1px solid rgba(255,255,255,0.10);border-radius:7px;` +
+          `background:rgba(0,0,0,0.14);overflow:hidden;${cursor}">`,
+      );
+      parts.push(
+        '<div style="min-height:30px;padding:6px 8px;display:flex;align-items:center;gap:8px;box-sizing:border-box;">' +
+          `<span aria-hidden="true" style="width:16px;flex:0 0 16px;text-align:center;color:${statusColor};font-weight:700;">${statusGlyph}</span>` +
+          `<span style="flex:1;min-width:0;color:${secondary};white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(event.title)}</span>` +
+          (event.subtitle
+            ? `<span style="max-width:36%;color:${muted};font-size:0.82em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(event.subtitle)}</span>`
+            : '') +
+          (Number.isFinite(event.durationMs)
+            ? `<span style="color:${muted};font-size:0.78em;white-space:nowrap;">${escapeHtml(this.formatCodexDuration(event.durationMs as number))}</span>`
+            : '') +
+          (hasDetails
+            ? `<span aria-hidden="true" style="width:12px;flex:0 0 12px;color:${muted};text-align:center;">${chevron}</span>`
+            : '') +
+          '</div>',
+      );
+
+      if (expanded) {
+        parts.push('<div style="border-top:1px solid rgba(255,255,255,0.08);padding:8px 10px;">');
+        if (event.cwd) {
+          parts.push(`<div style="margin:0 0 6px;color:${muted};font-size:0.8em;">Working directory: ${escapeHtml(event.cwd)}</div>`);
+        }
+        if (event.path) {
+          parts.push(`<div style="margin:0 0 6px;color:${muted};font-size:0.8em;">${escapeHtml(event.path)}</div>`);
+        }
+        if (Array.isArray(event.files)) {
+          for (const file of event.files) {
+            parts.push(
+              `<div style="margin:0 0 6px;color:${secondary};font-size:0.86em;">${escapeHtml(file.kind)} ${escapeHtml(file.path)}</div>`,
+            );
+            if (file.diff) {
+              parts.push(
+                '<pre style="margin:0 0 8px;padding:8px;max-height:240px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+                  'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+                  escapeHtml(file.diff) +
+                  '</pre>',
+              );
+            }
+          }
+        }
+        if (event.arguments !== undefined) {
+          let argsText = '';
+          try {
+            argsText = JSON.stringify(event.arguments, null, 2);
+          } catch {
+            argsText = String(event.arguments);
+          }
+          if (argsText) {
+            parts.push(
+              '<pre style="margin:0 0 8px;padding:8px;max-height:180px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+                'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+                escapeHtml(argsText) +
+                '</pre>',
+            );
+          }
+        }
+        if (event.detail) {
+          parts.push(
+            '<pre style="margin:0;padding:8px;max-height:280px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+              'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+              escapeHtml(event.detail) +
+              '</pre>',
+          );
+        }
+        if (Number.isFinite(event.exitCode)) {
+          parts.push(`<div style="margin:6px 0 0;color:${muted};font-size:0.8em;">Exit code: ${event.exitCode}</div>`);
+        }
+        parts.push('</div>');
+      }
+      parts.push('</div>');
+    }
+
+    parts.push('</div>');
+    return parts.join('');
+  }
+
+  private formatCodexDuration(durationMs: number): string {
+    const milliseconds = Math.max(0, Number(durationMs) || 0);
+    if (milliseconds < 1000) return `${Math.round(milliseconds)}ms`;
+    if (milliseconds < 60_000) return `${(milliseconds / 1000).toFixed(milliseconds < 10_000 ? 1 : 0)}s`;
+    return `${Math.floor(milliseconds / 60_000)}m ${Math.round((milliseconds % 60_000) / 1000)}s`;
+  }
+
   private renderTextNodeHtml(node: TextNode): string {
     const textFormat = this.textNodeFormat(node);
     const isUser = node.author === 'user';
@@ -6428,6 +6608,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           parts.push('</div>');
         }
       }
+
+      const codexEventsHtml = this.renderCodexEventsHtml(node);
+      if (codexEventsHtml) parts.push(codexEventsHtml);
     }
 
     if (isUser) {
@@ -6742,6 +6925,21 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         });
       }
 
+      const codexEvents = Array.from(contentEl.querySelectorAll('[data-gcv1-codex-event-toggle]')) as HTMLElement[];
+      for (const el of codexEvents) {
+        const eventId = (el.getAttribute('data-gcv1-codex-event-toggle') ?? '').trim();
+        if (!eventId) continue;
+        const r = el.getBoundingClientRect();
+        zones.push({
+          kind: 'codex_event_toggle',
+          eventId,
+          left: (r.left - base.left) / z,
+          top: (r.top - base.top) / z,
+          width: r.width / z,
+          height: r.height / z,
+        });
+      }
+
       const contextBtns = Array.from(
         contentEl.querySelectorAll('[data-gcv1-preface-context-toggle]'),
       ) as HTMLElement[];
@@ -6917,6 +7115,11 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         }
 
         if (node.author !== 'assistant') return;
+
+        if (action.kind === 'codex_event_toggle') {
+          this.toggleCodexEventExpanded(node, action.eventId);
+          return;
+        }
 
         if (action.kind === 'summary_toggle') {
           const blocks = this.getFinalReasoningBlocks(node);
@@ -9313,7 +9516,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 	      const zone = this.getTextNodeHitZoneAtWorld(hit, world);
 	      const isToggleZone =
 	        zone &&
-	        ((hit.author === 'assistant' && (zone.kind === 'summary_toggle' || zone.kind === 'summary_chunk_toggle')) ||
+	        ((hit.author === 'assistant' &&
+            (zone.kind === 'summary_toggle' || zone.kind === 'summary_chunk_toggle' || zone.kind === 'codex_event_toggle')) ||
 	          (hit.author === 'user' && zone.kind === 'preface_context_toggle'));
 	      if (isToggleZone) {
 	        this.requestRender();
@@ -10262,6 +10466,12 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           const selectionChanged = this.selectedNodeId !== hit.id;
           this.selectedNodeId = hit.id;
           this.bringNodeToFront(hit.id);
+
+          if (zone.kind === 'codex_event_toggle') {
+            const handled = this.toggleCodexEventExpanded(hit, zone.eventId);
+            if (selectionChanged) this.emitUiState();
+            if (handled) return;
+          }
 
           if (zone.kind === 'summary_toggle') {
             const blocks = this.getFinalReasoningBlocks(hit);

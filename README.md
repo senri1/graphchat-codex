@@ -60,6 +60,8 @@ The application currently supports:
 - ChatGPT device-code login and logout.
 - Account, model, reasoning-effort, and rate-limit display.
 - Streaming assistant text and reasoning summaries into graph nodes.
+- Portable command, patch, plan, search, tool, agent, image, review, and
+  compaction events with compact expandable rows.
 - Turn cancellation and error handling.
 - Command and file approval prompts.
 - Native continuation and branching.
@@ -139,6 +141,8 @@ unrelated native thread.
 Important implementation:
 
 - `src/model/chat.ts`
+- `src/codex/events.ts`
+- `docs/codex-event-model.md`
 - `src/engine/WorldEngine.ts`
 - `src/App.tsx`
 

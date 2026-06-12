@@ -1,5 +1,6 @@
 import type { WorldEngineChatState } from '../engine/WorldEngine';
 import type { ChatNode, CodexConversationRef, ThinkingSummaryChunk } from '../model/chat';
+import { codexEventsFromThreadItems } from './events.ts';
 
 export type CodexThreadSummary = {
   id: string;
@@ -116,12 +117,12 @@ function reasoningForTurn(turn: CodexThreadTurn): ThinkingSummaryChunk[] | undef
   return summaries.map((text, summaryIndex) => ({ summaryIndex, text, done: true }));
 }
 
-function estimatedHeight(text: string, author: 'user' | 'assistant'): number {
+function estimatedHeight(text: string, author: 'user' | 'assistant', eventCount = 0): number {
   const explicitLines = Math.max(1, text.split('\n').length);
   const wrappedLines = Math.ceil(text.length / 66);
   const lines = Math.max(explicitLines, wrappedLines);
   const min = author === 'user' ? 120 : 150;
-  return Math.max(min, Math.min(440, 70 + lines * 19));
+  return Math.max(min, Math.min(620, 70 + lines * 19 + Math.max(0, eventCount) * 34));
 }
 
 function nodeWithPreservedRect(next: ChatNode, previous: ChatNode | null): ChatNode {
@@ -133,6 +134,7 @@ function nodeWithPreservedRect(next: ChatNode, previous: ChatNode | null): ChatN
       title: previous.title || next.title,
       modelId: previous.modelId ?? next.modelId,
       codexRef: previous.codexRef ? { ...next.codexRef, ...previous.codexRef } : next.codexRef,
+      expandedCodexEvents: previous.expandedCodexEvents,
     };
   }
   return { ...next, rect: { ...previous.rect } } as ChatNode;
@@ -201,8 +203,9 @@ export function mergeCodexThreadIntoChat(
 
     const userText = userTextForTurn(turn);
     const assistantText = assistantTextForTurn(turn);
+    const codexEvents = codexEventsFromThreadItems(turn.items);
     const userHeight = estimatedHeight(userText, 'user');
-    const assistantHeight = estimatedHeight(assistantText, 'assistant');
+    const assistantHeight = estimatedHeight(assistantText, 'assistant', codexEvents?.length ?? 0);
     const codexRef: CodexConversationRef = {
       threadId,
       turnId,
@@ -245,6 +248,7 @@ export function mergeCodexThreadIntoChat(
       },
       apiResponseKey: responseKey,
       codexRef,
+      codexEvents,
       thinkingSummary: reasoningForTurn(turn),
       summaryExpanded: false,
     };

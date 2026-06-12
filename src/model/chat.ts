@@ -14,6 +14,50 @@ export type CanonicalAssistantMessage = {
 
 export type ThinkingSummaryChunk = { summaryIndex: number; text: string; done: boolean };
 
+export type CodexEventStatus = 'in_progress' | 'completed' | 'failed' | 'declined';
+
+export type CodexEventKind =
+  | 'hook_prompt'
+  | 'plan'
+  | 'command'
+  | 'file_change'
+  | 'mcp_tool'
+  | 'dynamic_tool'
+  | 'collab_agent'
+  | 'web_search'
+  | 'image_view'
+  | 'image_generation'
+  | 'review_entered'
+  | 'review_exited'
+  | 'context_compaction';
+
+export type CodexEventFile = {
+  path: string;
+  kind: 'add' | 'update' | 'delete' | 'unknown';
+  diff?: string;
+};
+
+export type CodexEvent = {
+  id: string;
+  kind: CodexEventKind;
+  title: string;
+  subtitle?: string;
+  status: CodexEventStatus;
+  detail?: string;
+  command?: string;
+  cwd?: string;
+  exitCode?: number;
+  durationMs?: number;
+  files?: CodexEventFile[];
+  tool?: string;
+  server?: string;
+  arguments?: unknown;
+  query?: string;
+  path?: string;
+  startedAtMs?: number;
+  completedAtMs?: number;
+};
+
 export type ChatLlmTask = {
   provider: string;
   kind: string;
@@ -102,6 +146,8 @@ export type ChatNode =
       canonicalMessage?: CanonicalAssistantMessage;
       canonicalMeta?: unknown;
       codexRef?: CodexConversationRef;
+      codexEvents?: CodexEvent[];
+      expandedCodexEvents?: Record<string, boolean>;
       thinkingSummary?: ThinkingSummaryChunk[];
       summaryExpanded?: boolean;
       expandedSummaryChunks?: Record<number, boolean>;

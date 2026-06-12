@@ -10,6 +10,7 @@ type AnnotatePointerTrigger = { pointerId: number; pointerType: string };
 export type TextLod2Action =
   | { kind: 'summary_toggle'; nodeId: string }
   | { kind: 'summary_chunk_toggle'; nodeId: string; summaryIndex: number }
+  | { kind: 'codex_event_toggle'; nodeId: string; eventId: string }
   | { kind: 'preface_context_toggle'; nodeId: string; contextIndex: number };
 
 function clamp(v: number, min: number, max: number): number {
@@ -546,6 +547,16 @@ export class TextLod2Overlay {
       e.preventDefault();
       e.stopPropagation();
       this.onRequestAction?.({ kind: 'summary_chunk_toggle', nodeId, summaryIndex });
+      return;
+    }
+
+    const codexEvent = target.closest?.('[data-gcv1-codex-event-toggle]') as HTMLElement | null;
+    if (codexEvent) {
+      const eventId = (codexEvent.getAttribute('data-gcv1-codex-event-toggle') ?? '').trim();
+      if (!eventId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      this.onRequestAction?.({ kind: 'codex_event_toggle', nodeId, eventId });
       return;
     }
 

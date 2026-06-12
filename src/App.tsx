@@ -57,7 +57,14 @@ import {
   type RuntimeApiKeys,
   type RuntimeApiProvider,
 } from './services/runtimeApiKeys';
-import type { ChatAttachment, ChatNode, CodexConversationRef, InkStroke, ThinkingSummaryChunk } from './model/chat';
+import type {
+  ChatAttachment,
+  ChatNode,
+  CodexConversationRef,
+  CodexEvent,
+  InkStroke,
+  ThinkingSummaryChunk,
+} from './model/chat';
 import { normalizeBackgroundLibrary, type BackgroundLibraryItem } from './model/backgrounds';
 import {
   buildOpenAIResponseRequest,
@@ -126,6 +133,7 @@ import {
   type CodexThreadLinkOrigin,
   type CodexThreadLinks,
 } from './codex/threadLinks';
+import { applyCodexEventNotification } from './codex/events';
 
 type ChatTurnMeta = {
   id: string;
@@ -222,6 +230,7 @@ type GenerationJob = {
   codexForkedFromThreadId?: string | null;
   codexForkedFromTurnId?: string | null;
   codexThreadOrigin?: CodexThreadLinkOrigin;
+  codexEvents?: CodexEvent[];
 };
 
 function normalizeCodexConversationRef(value: unknown): CodexConversationRef | null {
@@ -4783,6 +4792,7 @@ export default function App() {
       codexForkedFromThreadId: null,
       codexForkedFromTurnId: null,
       codexThreadOrigin: legacyHistory.length ? 'legacy' : 'created',
+      codexEvents: [],
     };
 
     generationJobsByAssistantIdRef.current.set(job.assistantNodeId, job);
@@ -4792,6 +4802,7 @@ export default function App() {
       llmParams,
       llmError: null,
       llmTask: { provider: 'codex', kind: 'turn', cancelable: true },
+      codexEvents: undefined,
     });
     if (activeChatIdRef.current === args.chatId) {
       engineRef.current?.setTextNodeLlmState(args.assistantNodeId, {
@@ -4801,6 +4812,7 @@ export default function App() {
         llmError: null,
         llmTask: { provider: 'codex', kind: 'turn', cancelable: true },
       });
+      engineRef.current?.setTextNodeCodexEvents(args.assistantNodeId, undefined);
     }
     schedulePersistSoon();
 
@@ -4908,6 +4920,15 @@ export default function App() {
 
       const method = String(event.method ?? '');
       const params = event.params ?? {};
+      const nextCodexEvents = applyCodexEventNotification(job.codexEvents, method, params);
+      if (nextCodexEvents !== job.codexEvents) {
+        job.codexEvents = nextCodexEvents;
+        updateStoredTextNode(job.chatId, job.assistantNodeId, { codexEvents: nextCodexEvents });
+        if (activeChatIdRef.current === job.chatId) {
+          engineRef.current?.setTextNodeCodexEvents(job.assistantNodeId, nextCodexEvents);
+        }
+        schedulePersistSoon();
+      }
       if (method === 'item/agentMessage/delta') {
         const delta = typeof params.delta === 'string' ? params.delta : '';
         if (!delta) return;

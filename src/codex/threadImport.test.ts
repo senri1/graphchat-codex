@@ -16,7 +16,7 @@ function turn(id: string, user: string, assistant: string) {
 
 function thread(args: {
   id: string;
-  turns: ReturnType<typeof turn>[];
+  turns: NonNullable<CodexThreadDetail['turns']>;
   forkedFromId?: string;
 }): CodexThreadDetail {
   return {
@@ -128,4 +128,38 @@ test('importing a fork reuses shared turn IDs and adds only the fork-specific ta
   assert.equal(assistantForTurn(fork.state.nodes, 'turn-b')?.codexRef?.threadId, 'thread-1');
   assert.equal(assistantForTurn(fork.state.nodes, 'turn-c')?.codexRef?.threadId, 'thread-2');
   assert.equal(assistantForTurn(fork.state.nodes, 'turn-c')?.codexRef?.forkedFromThreadId, 'thread-1');
+});
+
+test('imports portable Codex tool events alongside assistant text', () => {
+  const imported = mergeCodexThreadIntoChat(
+    null,
+    thread({
+      id: 'thread-events',
+      turns: [
+        {
+          id: 'turn-events',
+          status: 'completed',
+          items: [
+            { type: 'userMessage', content: [{ type: 'text', text: 'Run tests' }] },
+            {
+              type: 'commandExecution',
+              id: 'cmd-1',
+              command: 'npm test',
+              cwd: '/workspace',
+              status: 'completed',
+              aggregatedOutput: 'ok',
+              exitCode: 0,
+            },
+            { type: 'agentMessage', text: 'Tests passed.', phase: 'final_answer' },
+          ],
+        },
+      ],
+    }),
+    'chat-events',
+  );
+
+  const assistant = assistantForTurn(imported.state.nodes, 'turn-events');
+  assert.equal(assistant?.codexEvents?.length, 1);
+  assert.equal(assistant?.codexEvents?.[0]?.kind, 'command');
+  assert.equal(assistant?.codexEvents?.[0]?.detail, 'ok');
 });
