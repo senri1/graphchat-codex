@@ -14,7 +14,7 @@ export type CanonicalAssistantMessage = {
 
 export type ThinkingSummaryChunk = { summaryIndex: number; text: string; done: boolean };
 
-export type CodexEventStatus = 'in_progress' | 'completed' | 'failed' | 'declined';
+export type CodexEventStatus = 'in_progress' | 'completed' | 'failed' | 'declined' | 'warning';
 
 export type CodexEventKind =
   | 'hook_prompt'
@@ -29,7 +29,29 @@ export type CodexEventKind =
   | 'image_generation'
   | 'review_entered'
   | 'review_exited'
-  | 'context_compaction';
+  | 'context_compaction'
+  | 'turn_diff'
+  | 'hook'
+  | 'approval_review'
+  | 'warning'
+  | 'error'
+  | 'model_reroute'
+  | 'model_verification'
+  | 'token_usage';
+
+export type CodexPlanStep = {
+  step: string;
+  status: 'pending' | 'in_progress' | 'completed';
+};
+
+export type CodexTokenUsage = {
+  lastInputTokens?: number;
+  lastOutputTokens?: number;
+  lastReasoningTokens?: number;
+  lastTotalTokens?: number;
+  totalTokens?: number;
+  modelContextWindow?: number;
+};
 
 export type CodexEventFile = {
   path: string;
@@ -54,6 +76,9 @@ export type CodexEvent = {
   arguments?: unknown;
   query?: string;
   path?: string;
+  steps?: CodexPlanStep[];
+  terminalInput?: string[];
+  tokenUsage?: CodexTokenUsage;
   startedAtMs?: number;
   completedAtMs?: number;
 };

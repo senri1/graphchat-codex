@@ -1,4 +1,11 @@
-import type { CodexEvent, CodexEventFile, CodexEventKind, CodexEventStatus } from '../model/chat';
+import type {
+  CodexEvent,
+  CodexEventFile,
+  CodexEventKind,
+  CodexEventStatus,
+  CodexPlanStep,
+  CodexTokenUsage,
+} from '../model/chat';
 
 type EventTiming = {
   startedAtMs?: number | null;
@@ -29,8 +36,143 @@ function statusFor(value: unknown, fallback: CodexEventStatus = 'completed'): Co
   if (status === 'inprogress' || status === 'in_progress' || status === 'running') return 'in_progress';
   if (status === 'completed' || status === 'success' || status === 'succeeded') return 'completed';
   if (status === 'failed' || status === 'error') return 'failed';
-  if (status === 'declined' || status === 'denied') return 'declined';
+  if (status === 'declined' || status === 'denied' || status === 'blocked' || status === 'stopped') return 'declined';
+  if (status === 'warning') return 'warning';
   return fallback;
+}
+
+function humanize(value: unknown): string {
+  const raw = clean(value);
+  if (!raw) return '';
+  return raw
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^./, (character) => character.toUpperCase());
+}
+
+function planSteps(value: unknown): CodexPlanStep[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const steps = value
+    .map((entry): CodexPlanStep | null => {
+      if (!entry || typeof entry !== 'object') return null;
+      const raw = entry as any;
+      const step = clean(raw.step);
+      if (!step) return null;
+      const status =
+        raw.status === 'completed'
+          ? 'completed'
+          : raw.status === 'inProgress' || raw.status === 'in_progress'
+            ? 'in_progress'
+            : 'pending';
+      return { step, status };
+    })
+    .filter((entry): entry is CodexPlanStep => Boolean(entry));
+  return steps.length ? steps : undefined;
+}
+
+function tokenUsage(value: unknown): CodexTokenUsage | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as any;
+  const last = raw.last && typeof raw.last === 'object' ? raw.last : {};
+  const total = raw.total && typeof raw.total === 'object' ? raw.total : {};
+  const usage: CodexTokenUsage = {
+    ...(finiteNumber(last.inputTokens) !== undefined ? { lastInputTokens: finiteNumber(last.inputTokens) } : {}),
+    ...(finiteNumber(last.outputTokens) !== undefined ? { lastOutputTokens: finiteNumber(last.outputTokens) } : {}),
+    ...(finiteNumber(last.reasoningOutputTokens) !== undefined
+      ? { lastReasoningTokens: finiteNumber(last.reasoningOutputTokens) }
+      : {}),
+    ...(finiteNumber(last.totalTokens) !== undefined ? { lastTotalTokens: finiteNumber(last.totalTokens) } : {}),
+    ...(finiteNumber(total.totalTokens) !== undefined ? { totalTokens: finiteNumber(total.totalTokens) } : {}),
+    ...(finiteNumber(raw.modelContextWindow) !== undefined
+      ? { modelContextWindow: finiteNumber(raw.modelContextWindow) }
+      : {}),
+  };
+  return Object.keys(usage).length ? usage : undefined;
+}
+
+function hookDetail(run: any): string {
+  const lines: string[] = [];
+  if (clean(run?.statusMessage)) lines.push(clean(run.statusMessage));
+  for (const entry of Array.isArray(run?.entries) ? run.entries : []) {
+    const text = clean(entry?.text);
+    if (!text) continue;
+    const kind = humanize(entry?.kind);
+    lines.push(kind ? `${kind}: ${text}` : text);
+  }
+  return lines.join('\n');
+}
+
+function approvalActionSummary(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  const raw = value as any;
+  switch (clean(raw.type)) {
+    case 'command':
+      return clean(raw.command);
+    case 'execve':
+      return [clean(raw.program), ...(Array.isArray(raw.argv) ? raw.argv.map(clean).filter(Boolean) : [])].join(' ');
+    case 'applyPatch':
+      return `${Array.isArray(raw.files) ? raw.files.length : 0} file change`;
+    case 'networkAccess':
+      return [clean(raw.protocol), clean(raw.target || raw.host)].filter(Boolean).join(' ');
+    case 'mcpToolCall':
+      return [clean(raw.server), clean(raw.toolTitle || raw.toolName)].filter(Boolean).join(' / ');
+    case 'requestPermissions':
+      return clean(raw.reason) || 'Additional permissions';
+    default:
+      return '';
+  }
+}
+
+function approvalReviewStatus(value: unknown): CodexEventStatus {
+  switch (clean(value)) {
+    case 'inProgress':
+      return 'in_progress';
+    case 'approved':
+      return 'completed';
+    case 'denied':
+      return 'declined';
+    case 'timedOut':
+    case 'aborted':
+      return 'failed';
+    default:
+      return 'in_progress';
+  }
+}
+
+function warningId(method: string, raw: any): string {
+  return `${method}:${clean(raw?.turnId) || clean(raw?.threadId) || 'global'}:${clean(
+    raw?.message || raw?.summary || raw?.error?.message,
+  )}`;
+}
+
+function semanticEventIndex(events: CodexEvent[], kind: CodexEventKind, syntheticPrefix?: string): number {
+  const exact = events.findIndex((event) => event.kind === kind && (!syntheticPrefix || event.id.startsWith(syntheticPrefix)));
+  if (exact >= 0 || syntheticPrefix) return exact;
+  return events.findIndex((event) => event.kind === kind);
+}
+
+function upsertSemanticEvent(
+  events: CodexEvent[] | null | undefined,
+  event: CodexEvent,
+  syntheticPrefix?: string,
+): CodexEvent[] {
+  const current = Array.isArray(events) ? events : [];
+  const direct = current.findIndex((entry) => entry.id === event.id);
+  const index = direct >= 0 ? direct : semanticEventIndex(current, event.kind, syntheticPrefix);
+  if (index < 0) return [...current, event];
+  const next = current.slice();
+  next[index] = {
+    ...current[index],
+    ...event,
+    id: direct >= 0 ? event.id : current[index].id,
+    startedAtMs: current[index].startedAtMs ?? event.startedAtMs,
+    completedAtMs: event.completedAtMs ?? current[index].completedAtMs,
+    steps: event.steps ?? current[index].steps,
+    terminalInput: event.terminalInput ?? current[index].terminalInput,
+    tokenUsage: event.tokenUsage ?? current[index].tokenUsage,
+  };
+  return next;
 }
 
 function fileKind(value: unknown): CodexEventFile['kind'] {
@@ -281,21 +423,30 @@ export function applyCodexEventNotification(
       ...(name === 'item/started' ? { startedAtMs: finiteNumber(raw.startedAtMs) } : {}),
       ...(name === 'item/completed' ? { completedAtMs: finiteNumber(raw.completedAtMs) } : {}),
     });
-    return event ? upsertCodexEvent(events, event) : Array.isArray(events) ? events : [];
+    if (!event) return Array.isArray(events) ? events : [];
+    if (event.kind === 'plan') return upsertSemanticEvent(events, event, 'turn-plan:');
+    if (event.kind === 'context_compaction') {
+      return upsertSemanticEvent(events, event, 'context-compaction:');
+    }
+    return upsertCodexEvent(events, event);
   }
 
   if (name === 'item/commandExecution/outputDelta' || name === 'item/plan/delta') {
     const itemId = clean(raw.itemId);
-    const current = (Array.isArray(events) ? events : []).find((entry) => entry.id === itemId);
     const kind: CodexEventKind = name.includes('commandExecution') ? 'command' : 'plan';
+    const allEvents = Array.isArray(events) ? events : [];
+    const current =
+      allEvents.find((entry) => entry.id === itemId) ??
+      (kind === 'plan' ? allEvents.find((entry) => entry.kind === 'plan') : undefined);
+    const targetId = current?.id || itemId;
     const fallback: CodexEvent = {
-      id: itemId || `${kind}-stream`,
+      id: targetId || `${kind}-stream`,
       kind,
       title: kind === 'command' ? 'Running command' : 'Updating plan',
       status: 'in_progress',
       detail: typeof raw.delta === 'string' ? raw.delta : '',
     };
-    return patchEvent(events, itemId, { detail: appendDetail(current?.detail, raw.delta), status: 'in_progress' }, fallback);
+    return patchEvent(events, targetId, { detail: appendDetail(current?.detail, raw.delta), status: 'in_progress' }, fallback);
   }
 
   if (name === 'item/fileChange/patchUpdated') {
@@ -329,6 +480,182 @@ export function applyCodexEventNotification(
     });
   }
 
+  if (name === 'item/commandExecution/terminalInteraction') {
+    const itemId = clean(raw.itemId);
+    const stdin = typeof raw.stdin === 'string' ? raw.stdin : '';
+    if (!itemId || !stdin) return Array.isArray(events) ? events : [];
+    const current = (Array.isArray(events) ? events : []).find((entry) => entry.id === itemId);
+    const terminalInput = [...(current?.terminalInput ?? []), stdin];
+    return patchEvent(events, itemId, { terminalInput, status: 'in_progress' });
+  }
+
+  if (name === 'turn/plan/updated') {
+    const steps = planSteps(raw.plan);
+    const completed = steps?.filter((step) => step.status === 'completed').length ?? 0;
+    const total = steps?.length ?? 0;
+    const explanation = clean(raw.explanation);
+    const event: CodexEvent = {
+      id: `turn-plan:${clean(raw.turnId) || 'current'}`,
+      kind: 'plan',
+      title: 'Updated plan',
+      status: total > 0 && completed === total ? 'completed' : 'in_progress',
+      ...(total ? { subtitle: `${completed}/${total} complete` } : {}),
+      ...(explanation ? { detail: explanation } : {}),
+      ...(steps ? { steps } : {}),
+    };
+    return upsertSemanticEvent(events, event);
+  }
+
+  if (name === 'turn/diff/updated') {
+    const detail = typeof raw.diff === 'string' ? raw.diff : '';
+    const changedFiles = Array.from(detail.matchAll(/^diff --git /gm)).length;
+    return upsertCodexEvent(events, {
+      id: `turn-diff:${clean(raw.turnId) || 'current'}`,
+      kind: 'turn_diff',
+      title: 'Updated turn diff',
+      status: 'in_progress',
+      ...(changedFiles ? { subtitle: `${changedFiles} file${changedFiles === 1 ? '' : 's'}` } : {}),
+      ...(detail ? { detail } : {}),
+    });
+  }
+
+  if (name === 'hook/started' || name === 'hook/completed') {
+    const run = raw.run && typeof raw.run === 'object' ? raw.run : {};
+    const eventName = humanize(run.eventName) || 'Hook';
+    const completed = name === 'hook/completed';
+    const detail = hookDetail(run);
+    const source = humanize(run.source);
+    const handler = humanize(run.handlerType);
+    return upsertCodexEvent(events, {
+      id: clean(run.id) || `hook:${eventName}`,
+      kind: 'hook',
+      title: `${completed ? 'Ran' : 'Running'} ${eventName} hook`,
+      status: statusFor(run.status, completed ? 'completed' : 'in_progress'),
+      ...([handler, source].filter(Boolean).length ? { subtitle: [handler, source].filter(Boolean).join(' / ') } : {}),
+      ...(detail ? { detail } : {}),
+      ...(clean(run.sourcePath) ? { path: clean(run.sourcePath) } : {}),
+      ...(finiteNumber(run.startedAt) !== undefined ? { startedAtMs: finiteNumber(run.startedAt) } : {}),
+      ...(finiteNumber(run.completedAt) !== undefined ? { completedAtMs: finiteNumber(run.completedAt) } : {}),
+      ...(finiteNumber(run.durationMs) !== undefined ? { durationMs: finiteNumber(run.durationMs) } : {}),
+    });
+  }
+
+  if (name === 'item/autoApprovalReview/started' || name === 'item/autoApprovalReview/completed') {
+    const review = raw.review && typeof raw.review === 'object' ? raw.review : {};
+    const action = approvalActionSummary(raw.action);
+    const rationale = clean(review.rationale);
+    const risk = humanize(review.riskLevel);
+    return upsertCodexEvent(events, {
+      id: `approval-review:${clean(raw.reviewId) || clean(raw.targetItemId) || 'current'}`,
+      kind: 'approval_review',
+      title: name.endsWith('/started') ? 'Reviewing approval request' : humanize(review.status) || 'Reviewed approval request',
+      status: approvalReviewStatus(review.status),
+      ...(risk ? { subtitle: `${risk} risk` } : action ? { subtitle: action } : {}),
+      ...([action, rationale].filter(Boolean).length ? { detail: [action, rationale].filter(Boolean).join('\n\n') } : {}),
+      ...(finiteNumber(raw.startedAtMs) !== undefined ? { startedAtMs: finiteNumber(raw.startedAtMs) } : {}),
+      ...(finiteNumber(raw.completedAtMs) !== undefined ? { completedAtMs: finiteNumber(raw.completedAtMs) } : {}),
+    });
+  }
+
+  if (name === 'thread/tokenUsage/updated') {
+    const usage = tokenUsage(raw.tokenUsage);
+    const latest = usage?.lastTotalTokens;
+    const window = usage?.modelContextWindow;
+    return upsertCodexEvent(events, {
+      id: `token-usage:${clean(raw.turnId) || 'current'}`,
+      kind: 'token_usage',
+      title: 'Updated context usage',
+      status: 'completed',
+      ...(latest !== undefined && window !== undefined ? { subtitle: `${latest.toLocaleString()} / ${window.toLocaleString()}` } : {}),
+      ...(usage ? { tokenUsage: usage } : {}),
+    });
+  }
+
+  if (name === 'model/rerouted') {
+    const from = clean(raw.fromModel);
+    const to = clean(raw.toModel);
+    return upsertCodexEvent(events, {
+      id: `model-reroute:${clean(raw.turnId) || 'current'}`,
+      kind: 'model_reroute',
+      title: 'Model rerouted',
+      status: 'warning',
+      ...([from, to].filter(Boolean).length ? { subtitle: [from, to].filter(Boolean).join(' to ') } : {}),
+      ...(clean(raw.reason) ? { detail: humanize(raw.reason) } : {}),
+    });
+  }
+
+  if (name === 'model/verification') {
+    const verifications = Array.isArray(raw.verifications) ? raw.verifications.map(humanize).filter(Boolean) : [];
+    return upsertCodexEvent(events, {
+      id: `model-verification:${clean(raw.turnId) || 'current'}`,
+      kind: 'model_verification',
+      title: 'Verified model access',
+      status: 'completed',
+      ...(verifications.length ? { detail: verifications.join('\n') } : {}),
+    });
+  }
+
+  if (name === 'warning' || name === 'guardianWarning') {
+    const message = clean(raw.message);
+    if (!message) return Array.isArray(events) ? events : [];
+    return upsertCodexEvent(events, {
+      id: warningId(name, raw),
+      kind: 'warning',
+      title: name === 'guardianWarning' ? 'Safety warning' : 'Codex warning',
+      status: 'warning',
+      detail: message,
+    });
+  }
+
+  if (name === 'error') {
+    const message = clean(raw.error?.message);
+    if (!message) return Array.isArray(events) ? events : [];
+    return upsertCodexEvent(events, {
+      id: warningId(name, raw),
+      kind: 'error',
+      title: raw.willRetry ? 'Codex error, retrying' : 'Codex error',
+      status: raw.willRetry ? 'warning' : 'failed',
+      detail: [message, clean(raw.error?.additionalDetails)].filter(Boolean).join('\n\n'),
+    });
+  }
+
+  if (name === 'thread/compacted') {
+    return upsertSemanticEvent(
+      events,
+      {
+        id: `context-compaction:${clean(raw.turnId) || 'current'}`,
+        kind: 'context_compaction',
+        title: 'Compacted context',
+        status: 'completed',
+      },
+      'context-compaction:',
+    );
+  }
+
+  if (name === 'turn/completed') {
+    const turnStatus = clean(raw.turn?.status);
+    const finalStatus: CodexEventStatus =
+      turnStatus === 'failed'
+        ? 'failed'
+        : turnStatus === 'interrupted'
+          ? 'declined'
+          : 'completed';
+    const current = Array.isArray(events) ? events : [];
+    let changed = false;
+    const next = current.map((event) => {
+      if (event.status !== 'in_progress') return event;
+      changed = true;
+      return {
+        ...event,
+        status: finalStatus,
+        ...(finiteNumber(raw.turn?.completedAt) !== undefined
+          ? { completedAtMs: Number(raw.turn.completedAt) * 1000 }
+          : {}),
+      };
+    });
+    return changed ? next : current;
+  }
+
   return Array.isArray(events) ? events : [];
 }
 
@@ -351,6 +678,24 @@ export function normalizeCodexEvents(value: unknown): CodexEvent[] | undefined {
       const title = clean(raw.title);
       if (!id || !kind || !title) return null;
       const files = normalizeFiles(raw.files);
+      const steps = planSteps(raw.steps);
+      const terminalInput = Array.isArray(raw.terminalInput)
+        ? raw.terminalInput.map((entry: unknown) => (typeof entry === 'string' ? entry : '')).filter(Boolean)
+        : undefined;
+      const usage = tokenUsage(
+        raw.tokenUsage
+          ? {
+              last: {
+                inputTokens: raw.tokenUsage.lastInputTokens,
+                outputTokens: raw.tokenUsage.lastOutputTokens,
+                reasoningOutputTokens: raw.tokenUsage.lastReasoningTokens,
+                totalTokens: raw.tokenUsage.lastTotalTokens,
+              },
+              total: { totalTokens: raw.tokenUsage.totalTokens },
+              modelContextWindow: raw.tokenUsage.modelContextWindow,
+            }
+          : undefined,
+      );
       return {
         ...raw,
         id,
@@ -358,6 +703,9 @@ export function normalizeCodexEvents(value: unknown): CodexEvent[] | undefined {
         title,
         status: statusFor(raw.status, 'completed'),
         ...(files ? { files } : {}),
+        ...(steps ? { steps } : {}),
+        ...(terminalInput?.length ? { terminalInput } : {}),
+        ...(usage ? { tokenUsage: usage } : {}),
       } as CodexEvent;
     })
     .filter((event): event is CodexEvent => Boolean(event));

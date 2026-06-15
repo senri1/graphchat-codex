@@ -111,3 +111,28 @@ test('keeps separate reasoning items and summary indexes in timeline order', () 
     { summaryIndex: 1, text: 'Later reasoning', done: false },
   ]);
 });
+
+test('keeps one plan row when structured progress and plan items overlap', () => {
+  let timeline = applyCodexTimelineNotification([], 'turn/plan/updated', {
+    turnId: 'turn-1',
+    plan: [
+      { step: 'Inspect', status: 'completed' },
+      { step: 'Implement', status: 'inProgress' },
+    ],
+  });
+  timeline = applyCodexTimelineNotification(timeline, 'item/started', {
+    startedAtMs: 10,
+    item: { type: 'plan', id: 'plan-item', text: '' },
+  });
+  timeline = applyCodexTimelineNotification(timeline, 'item/plan/delta', {
+    itemId: 'plan-item',
+    delta: 'Inspect, then implement.',
+  });
+
+  assert.equal(timeline.length, 1);
+  assert.equal(timeline[0]?.kind, 'event');
+  if (timeline[0]?.kind !== 'event') return;
+  assert.equal(timeline[0].event.id, 'turn-plan:turn-1');
+  assert.equal(timeline[0].event.steps?.length, 2);
+  assert.equal(timeline[0].event.detail, 'Inspect, then implement.');
+});

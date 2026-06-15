@@ -35,6 +35,12 @@ Unknown future item types remain available in raw imported payloads but are not
 rendered until a normalizer is added. This prevents an App Server upgrade from
 making existing chats unreadable.
 
+Live-only notifications are also folded into the ordered timeline while a turn
+is active. These include structured plan progress, aggregate turn diffs, hooks,
+automatic approval reviews, terminal interaction, token usage, model reroutes,
+model verification, warnings, retryable errors, and legacy `thread/compacted`
+notifications. Stable synthetic IDs keep repeated updates in one row.
+
 ## Lifecycle
 
 - `item/started` appends an in-progress item at its first observed position.

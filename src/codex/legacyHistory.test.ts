@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChatNode } from '../model/chat';
-import { buildLegacyHistory, isLegacyAssistantContinuationNode } from './legacyHistory.ts';
+import { buildLegacyHistory, isLegacyContinuationNode } from './legacyHistory.ts';
 
 function textNode(args: {
   id: string;
@@ -101,7 +101,36 @@ test('rejects broken or cyclic ancestry', () => {
   assert.throws(() => buildLegacyHistory(cycle, 'a1'), /parent cycle/);
 });
 
-test('does not allow failed assistant responses as legacy continuation points', () => {
+test('allows completed user and assistant nodes as legacy continuation points', () => {
+  const user = textNode({ id: 'u1', author: 'user', content: 'Legacy note' });
+  const assistant = textNode({ id: 'a1', parentId: 'u1', author: 'assistant', content: 'Legacy answer' });
+
+  assert.equal(isLegacyContinuationNode(user), true);
+  assert.equal(isLegacyContinuationNode(assistant), true);
+});
+
+test('allows a non-empty stopped assistant response as a legacy continuation point', () => {
+  const user = textNode({ id: 'u1', author: 'user', content: 'Convert the delimiters' });
+  const assistant = textNode({
+    id: 'a1',
+    parentId: 'u1',
+    author: 'assistant',
+    content: 'I converted the first section.',
+  });
+  assistant.llmError = 'Canceled';
+
+  assert.equal(isLegacyContinuationNode(assistant), true);
+  assert.deepEqual(buildLegacyHistory([user, assistant], assistant.id), [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Convert the delimiters' }] },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'I converted the first section.' }],
+    },
+  ]);
+});
+
+test('does not allow incomplete, empty, or failed nodes as legacy continuation points', () => {
   const failed = textNode({
     id: 'a1',
     parentId: 'u1',
@@ -113,7 +142,12 @@ test('does not allow failed assistant responses as legacy continuation points', 
     textNode({ id: 'u1', author: 'user', content: 'Hello' }),
     failed,
   ];
+  const empty = textNode({ id: 'u2', author: 'user', content: '  ' });
+  const draft = textNode({ id: 'u3', author: 'user', content: 'Unsent draft' });
+  draft.conversationDraft = true;
 
-  assert.equal(isLegacyAssistantContinuationNode(failed), false);
+  assert.equal(isLegacyContinuationNode(failed), false);
+  assert.equal(isLegacyContinuationNode(empty), false);
+  assert.equal(isLegacyContinuationNode(draft), false);
   assert.throws(() => buildLegacyHistory(nodes, failed.id), /failed assistant response/);
 });

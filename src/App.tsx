@@ -118,7 +118,7 @@ import {
 } from './codex/threadImport';
 import {
   buildLegacyHistory,
-  isLegacyAssistantContinuationNode,
+  isLegacyContinuationNode,
   type CodexInjectedMessage,
 } from './codex/legacyHistory';
 import {
@@ -126,6 +126,11 @@ import {
   resolveCodexComposerModelId,
   type CodexRuntimeModel,
 } from './codex/models';
+import {
+  DEFAULT_CODEX_PERMISSION_MODE,
+  normalizeCodexPermissionMode,
+  type CodexPermissionMode,
+} from './codex/permissions';
 import {
   hasCodexThreadLink,
   normalizeCodexThreadLinks,
@@ -163,6 +168,7 @@ type ChatRuntimeMeta = {
   llm: OpenAIChatSettings;
   backgroundStorageKey: string | null;
   codexWorkingFolderPath: string | null;
+  codexPermissionMode: CodexPermissionMode;
   codexThreads: CodexThreadLinks;
   legacyImport?: {
     source: 'graphchatv1';
@@ -294,11 +300,11 @@ function isEditableDocumentNode(
   return Boolean(node?.kind === 'text' && node.isEditNode && !node.conversationDraft);
 }
 
-function isLegacyAssistantNode(
+function isLegacyContinuationEndpoint(
   meta: ChatRuntimeMeta,
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
-  return Boolean(meta.legacyImport && isLegacyAssistantContinuationNode(node));
+  return Boolean(meta.legacyImport?.source === 'graphchatv1' && isLegacyContinuationNode(node));
 }
 
 function conversationContextDeveloperInstructions(base: string, cwd: string, chatId: string): string {
@@ -3262,6 +3268,9 @@ export default function App() {
     };
   }, []);
   const [composerModelId, setComposerModelId] = useState<string>(() => DEFAULT_MODEL_ID);
+  const [composerCodexPermissionMode, setComposerCodexPermissionMode] = useState<CodexPermissionMode>(
+    () => DEFAULT_CODEX_PERMISSION_MODE,
+  );
   const [composerWebSearch, setComposerWebSearch] = useState<boolean>(() => true);
   const [activeChatSystemInstructionOverride, setActiveChatSystemInstructionOverride] = useState<string | null>(() => null);
 
@@ -3291,6 +3300,7 @@ export default function App() {
       llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
       backgroundStorageKey: null,
       codexWorkingFolderPath: null,
+      codexPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
       codexThreads: {},
     });
     return { root, chatId, chatStates, chatMeta };
@@ -3322,6 +3332,7 @@ export default function App() {
       llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
       backgroundStorageKey: null,
       codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+      codexPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
       codexThreads: {},
     };
     chatMetaRef.current.set(chatId, meta);
@@ -4513,6 +4524,37 @@ export default function App() {
     }, delay);
   };
 
+  const persistCodexJobRef = (job: GenerationJob): CodexConversationRef | null => {
+    const threadId = String(job.codexThreadId ?? '').trim();
+    const turnId = String(job.codexTurnId ?? '').trim();
+    const cwd = String(job.codexCwd ?? '').trim();
+    const model = String(job.codexModel ?? '').trim();
+    if (!threadId || !turnId || !cwd) return null;
+
+    const codexRef: CodexConversationRef = {
+      threadId,
+      turnId,
+      cwd,
+      ...(model ? { model } : {}),
+      ...(job.codexEffort ? { effort: job.codexEffort } : {}),
+      ...(job.codexForkedFromThreadId ? { forkedFromThreadId: job.codexForkedFromThreadId } : {}),
+      ...(job.codexForkedFromTurnId ? { forkedFromTurnId: job.codexForkedFromTurnId } : {}),
+    };
+    const meta = ensureChatMeta(job.chatId);
+    meta.codexThreads = upsertCodexThreadLink(meta.codexThreads, {
+      threadId,
+      cwd,
+      origin: job.codexThreadOrigin ?? (job.codexForkedFromThreadId ? 'forked' : 'created'),
+      ...(job.codexForkedFromThreadId ? { forkedFromThreadId: job.codexForkedFromThreadId } : {}),
+      ...(job.codexForkedFromTurnId ? { forkedFromTurnId: job.codexForkedFromTurnId } : {}),
+    });
+    updateStoredTextNode(job.chatId, job.assistantNodeId, { codexRef });
+    if (activeChatIdRef.current === job.chatId) {
+      engineRef.current?.setTextNodeCodexRef(job.assistantNodeId, codexRef);
+    }
+    return codexRef;
+  };
+
   const finishJob = (
     assistantNodeId: string,
     result: {
@@ -4592,6 +4634,7 @@ export default function App() {
       if (job.runtime === 'codex') {
         const threadId = String(job.codexThreadId ?? '').trim();
         const turnId = String(job.codexTurnId ?? '').trim();
+        persistCodexJobRef(job);
         try {
           job.abortController.abort();
         } catch {
@@ -4716,9 +4759,9 @@ export default function App() {
     let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
       const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
-      if (!isLegacyAssistantNode(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+      if (!isLegacyContinuationEndpoint(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
         const message =
-          'To continue or branch, reply from an editable document, a completed Codex response, or an imported GraphChatV1 response.';
+          'To continue or branch, reply from an editable document, a completed or stopped Codex response, or an imported GraphChatV1 response.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
         if (activeChatIdRef.current === args.chatId) {
           engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
@@ -4829,6 +4872,7 @@ export default function App() {
         prompt,
         model: codexModel,
         ...(codexEffort ? { effort: codexEffort } : {}),
+        permissionMode: normalizeCodexPermissionMode(meta.codexPermissionMode),
         developerInstructions: conversationContextDeveloperInstructions(
           args.systemInstruction,
           workingFolder,
@@ -4842,8 +4886,8 @@ export default function App() {
           : null,
         ...(legacyHistory.length ? { legacyHistory } : {}),
       });
-      if (job.closed) return;
       if (!response?.ok || !response.result) {
+        if (job.closed) return;
         finishJob(job.assistantNodeId, {
           finalText: job.fullText,
           error: response?.error || 'Failed to start the Codex turn.',
@@ -4861,6 +4905,17 @@ export default function App() {
           : response.result.mode === 'legacy'
             ? 'legacy'
             : job.codexThreadOrigin ?? 'created';
+      if (job.closed) {
+        persistCodexJobRef(job);
+        if (job.codexThreadId && job.codexTurnId && window.gcElectron?.codexTurnInterrupt) {
+          void window.gcElectron.codexTurnInterrupt({
+            threadId: job.codexThreadId,
+            turnId: job.codexTurnId,
+          });
+        }
+        schedulePersistSoon();
+        return;
+      }
       updateStoredTextNode(args.chatId, args.assistantNodeId, {
         llmTask: {
           provider: 'codex',
@@ -4962,29 +5017,7 @@ export default function App() {
       if (method === 'turn/completed') {
         const status = String(params.turn?.status ?? '');
         const completed = status === 'completed';
-        if (completed && job.codexThreadId && job.codexTurnId && job.codexCwd && job.codexModel) {
-          const codexRef: CodexConversationRef = {
-            threadId: job.codexThreadId,
-            turnId: job.codexTurnId,
-            cwd: job.codexCwd,
-            model: job.codexModel,
-            ...(job.codexEffort ? { effort: job.codexEffort } : {}),
-            ...(job.codexForkedFromThreadId ? { forkedFromThreadId: job.codexForkedFromThreadId } : {}),
-            ...(job.codexForkedFromTurnId ? { forkedFromTurnId: job.codexForkedFromTurnId } : {}),
-          };
-          const meta = ensureChatMeta(job.chatId);
-          meta.codexThreads = upsertCodexThreadLink(meta.codexThreads, {
-            threadId: job.codexThreadId,
-            cwd: job.codexCwd,
-            origin: job.codexThreadOrigin ?? (job.codexForkedFromThreadId ? 'forked' : 'created'),
-            ...(job.codexForkedFromThreadId ? { forkedFromThreadId: job.codexForkedFromThreadId } : {}),
-            ...(job.codexForkedFromTurnId ? { forkedFromTurnId: job.codexForkedFromTurnId } : {}),
-          });
-          updateStoredTextNode(job.chatId, job.assistantNodeId, { codexRef });
-          if (activeChatIdRef.current === job.chatId) {
-            engineRef.current?.setTextNodeCodexRef(job.assistantNodeId, codexRef);
-          }
-        }
+        if (completed || status === 'interrupted') persistCodexJobRef(job);
         const turnError =
           typeof params.turn?.error?.message === 'string'
             ? params.turn.error.message
@@ -7255,6 +7288,7 @@ export default function App() {
           modelId: composerModelId,
           webSearchEnabled: composerWebSearch,
         };
+        existingMeta.codexPermissionMode = composerCodexPermissionMode;
       }
     }
 
@@ -7297,6 +7331,7 @@ export default function App() {
         meta.llm.modelId ??
         DEFAULT_MODEL_ID,
     );
+    setComposerCodexPermissionMode(normalizeCodexPermissionMode(meta.codexPermissionMode));
     setComposerWebSearch(Boolean(meta.llm.webSearchEnabled));
     setActiveChatSystemInstructionOverride(
       typeof meta.systemInstructionOverride === 'string' ? meta.systemInstructionOverride : null,
@@ -7510,6 +7545,7 @@ export default function App() {
         meta.llm.modelId ??
         DEFAULT_MODEL_ID,
     );
+    setComposerCodexPermissionMode(normalizeCodexPermissionMode(meta.codexPermissionMode));
 	    setComposerWebSearch(Boolean(meta.llm.webSearchEnabled));
     setActiveChatSystemInstructionOverride(
       typeof meta.systemInstructionOverride === 'string' ? meta.systemInstructionOverride : null,
@@ -7679,6 +7715,7 @@ export default function App() {
             },
             backgroundStorageKey: backgroundStorageKey,
             codexWorkingFolderPath,
+            codexPermissionMode: normalizeCodexPermissionMode(raw?.codexPermissionMode),
             codexThreads: normalizeCodexThreadLinks({
               rawLinks: raw?.codexThreads,
               nodes: storedState?.nodes ?? [],
@@ -7959,6 +7996,7 @@ export default function App() {
       llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
       backgroundStorageKey: null,
       codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+      codexPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
       codexThreads: {},
     });
     switchChat(id);
@@ -8262,6 +8300,7 @@ export default function App() {
           const importedMeta = {
             ...importedRawMeta,
             codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+            codexPermissionMode: normalizeCodexPermissionMode(importedRawMeta?.codexPermissionMode),
             codexThreads: normalizeCodexThreadLinks({
               rawLinks: importedRawMeta?.codexThreads,
               nodes: res.state.nodes,
@@ -8402,6 +8441,7 @@ export default function App() {
           llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
           backgroundStorageKey: null,
           codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+          codexPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
           codexThreads: {},
         });
         switchChat(id, { saveCurrent: false });
@@ -9490,9 +9530,9 @@ export default function App() {
         parentNode?.kind === 'text' && parentNode.author === 'assistant'
           ? normalizeCodexConversationRef(parentNode.codexRef)
           : null;
-      if (!parentRef && !isLegacyAssistantNode(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+      if (!parentRef && !isLegacyContinuationEndpoint(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
         showToast(
-          'To continue or branch, reply from an editable document, a completed Codex response, or an imported GraphChatV1 response.',
+          'To continue or branch, reply from an editable document, a completed or stopped Codex response, or an imported GraphChatV1 response.',
           'error',
           5200,
         );
@@ -9919,9 +9959,9 @@ export default function App() {
         parent?.kind === 'text' && parent.author === 'assistant'
           ? normalizeCodexConversationRef(parent.codexRef)
           : null;
-      if (!parentRef && !isLegacyAssistantNode(meta, parent)) {
+      if (!parentRef && !isLegacyContinuationEndpoint(meta, parent)) {
         showToast(
-          'To continue or branch, send from a user node attached to a completed Codex or imported GraphChatV1 response.',
+          'To continue or branch, send from a user node attached to a completed or stopped Codex response, or an imported GraphChatV1 response.',
           'error',
           5200,
         );
@@ -11501,6 +11541,13 @@ export default function App() {
           onChangeModelId={(next) => {
             applyComposerModelSelection(next || DEFAULT_MODEL_ID);
           }}
+          permissionMode={composerCodexPermissionMode}
+          onChangePermissionMode={(next) => {
+            const value = normalizeCodexPermissionMode(next);
+            setComposerCodexPermissionMode(value);
+            ensureChatMeta(activeChatId).codexPermissionMode = value;
+            schedulePersistSoon();
+          }}
           webSearchEnabled={composerWebSearch}
           showWebSearch={false}
           inkEnabled={false}
@@ -12311,6 +12358,7 @@ export default function App() {
               llm: { modelId: DEFAULT_MODEL_ID, webSearchEnabled: true },
               backgroundStorageKey: null,
               codexWorkingFolderPath: defaultCodexWorkingFolderPathRef.current,
+              codexPermissionMode: DEFAULT_CODEX_PERMISSION_MODE,
               codexThreads: {},
             });
 
@@ -12334,6 +12382,7 @@ export default function App() {
             setBackgroundLibrary([]);
             setBackgroundStorageKey(null);
             setComposerModelId(DEFAULT_MODEL_ID);
+            setComposerCodexPermissionMode(DEFAULT_CODEX_PERMISSION_MODE);
             setComposerWebSearch(true);
             setActiveChatSystemInstructionOverride(null);
             setDebugHudVisible(DEFAULT_DEBUG_HUD_VISIBLE);

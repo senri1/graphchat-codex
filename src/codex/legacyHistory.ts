@@ -32,16 +32,26 @@ function visibleTextForNode(node: Extract<ChatNode, { kind: 'text' }>): string {
   return parts.join('\n\n');
 }
 
-export function isLegacyAssistantContinuationNode(
+function isStoppedAssistantResponse(node: Extract<ChatNode, { kind: 'text' }>): boolean {
+  if (node.author !== 'assistant') return false;
+  const error = clean(node.llmError).toLowerCase();
+  return (
+    error === 'canceled' ||
+    error === 'cancelled' ||
+    error === 'codex turn interrupted.' ||
+    error.startsWith('interrupted ')
+  );
+}
+
+export function isLegacyContinuationNode(
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
   return Boolean(
     node?.kind === 'text' &&
-      node.author === 'assistant' &&
+      !node.conversationDraft &&
       !node.isGenerating &&
-      !node.llmError &&
-      typeof node.content === 'string' &&
-      node.content.trim(),
+      (!node.llmError || isStoppedAssistantResponse(node)) &&
+      visibleTextForNode(node),
   );
 }
 
@@ -67,7 +77,7 @@ export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexI
   const history: CodexInjectedMessage[] = [];
   for (const node of reversedPath.reverse()) {
     if (node.kind !== 'text') continue;
-    if (node.author === 'assistant' && node.llmError) {
+    if (node.author === 'assistant' && node.llmError && !isStoppedAssistantResponse(node)) {
       throw new Error('The selected imported branch contains a failed assistant response.');
     }
     const text = visibleTextForNode(node);

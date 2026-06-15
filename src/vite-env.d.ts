@@ -54,6 +54,7 @@ interface Window {
       prompt: string;
       model: string;
       effort?: string;
+      permissionMode?: 'read-only' | 'workspace-write' | 'full-access';
       developerInstructions?: string;
       source?: { threadId: string; turnId: string } | null;
       legacyHistory?: Array<{

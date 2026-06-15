@@ -176,12 +176,32 @@ function ensureReasoningSummary(
   return { ...reasoning, status: 'in_progress', summary };
 }
 
-const EVENT_DELTA_METHODS = new Set([
-  'item/commandExecution/outputDelta',
-  'item/plan/delta',
-  'item/fileChange/patchUpdated',
-  'item/mcpToolCall/progress',
-]);
+function applyEventsToTimeline(
+  timeline: CodexTimelineItem[],
+  updatedEvents: CodexEvent[],
+): CodexTimelineItem[] {
+  const byId = new Map(updatedEvents.map((event) => [event.id, event]));
+  const consumed = new Set<string>();
+  let changed = false;
+  const next = timeline.map((item) => {
+    if (item.kind !== 'event') return item;
+    const event = byId.get(item.id);
+    if (!event) {
+      changed = true;
+      return null;
+    }
+    consumed.add(event.id);
+    if (event !== item.event) changed = true;
+    return { id: event.id, kind: 'event' as const, event };
+  }).filter((item): item is CodexTimelineItem => Boolean(item));
+
+  for (const event of updatedEvents) {
+    if (consumed.has(event.id)) continue;
+    next.push({ id: event.id, kind: 'event', event });
+    changed = true;
+  }
+  return changed ? next : timeline;
+}
 
 export function applyCodexTimelineNotification(
   timeline: CodexTimelineItem[] | null | undefined,
@@ -197,7 +217,13 @@ export function applyCodexTimelineNotification(
       ...(name === 'item/started' ? { startedAtMs: raw.startedAtMs } : {}),
       ...(name === 'item/completed' ? { completedAtMs: raw.completedAtMs } : {}),
     });
-    return item ? upsertCodexTimelineItem(current, item) : current;
+    if (!item) return current;
+    if (item.kind !== 'event') return upsertCodexTimelineItem(current, item);
+    const existingEvents = current
+      .filter((entry): entry is Extract<CodexTimelineItem, { kind: 'event' }> => entry.kind === 'event')
+      .map((entry) => entry.event);
+    const updatedEvents = applyCodexEventNotification(existingEvents, name, raw);
+    return applyEventsToTimeline(current, updatedEvents);
   }
 
   if (name === 'item/agentMessage/delta') {
@@ -241,16 +267,11 @@ export function applyCodexTimelineNotification(
     });
   }
 
-  if (EVENT_DELTA_METHODS.has(name)) {
-    const itemId = clean(raw.itemId);
-    const existing = current.find((entry) => entry.id === itemId);
-    const existingEvents = existing?.kind === 'event' ? [existing.event] : [];
-    const updatedEvents = applyCodexEventNotification(existingEvents, name, raw);
-    const event = updatedEvents.find((entry) => entry.id === itemId) ?? updatedEvents[0] ?? null;
-    return event ? upsertCodexTimelineItem(current, { id: event.id, kind: 'event', event }) : current;
-  }
-
-  return current;
+  const existingEvents = current
+    .filter((item): item is Extract<CodexTimelineItem, { kind: 'event' }> => item.kind === 'event')
+    .map((item) => item.event);
+  const updatedEvents = applyCodexEventNotification(existingEvents, name, raw);
+  return updatedEvents === existingEvents ? current : applyEventsToTimeline(current, updatedEvents);
 }
 
 export function codexTimelineFromThreadItems(items: unknown): CodexTimelineItem[] | undefined {

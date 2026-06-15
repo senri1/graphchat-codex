@@ -9,6 +9,20 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
 }
 
+function codexPermissionSettings(value) {
+  const mode = cleanString(value) || 'full-access';
+  if (mode === 'full-access') {
+    return { mode, sandbox: 'danger-full-access', approvalPolicy: 'never' };
+  }
+  if (mode === 'workspace-write') {
+    return { mode, sandbox: 'workspace-write', approvalPolicy: 'on-request' };
+  }
+  if (mode === 'read-only') {
+    return { mode, sandbox: 'read-only', approvalPolicy: 'on-request' };
+  }
+  throw new Error(`Unsupported Codex permission mode: ${mode}`);
+}
+
 function normalizeInjectedHistory(value) {
   if (!Array.isArray(value)) return [];
   if (value.length > 2_000) throw new Error('Legacy history contains too many messages.');
@@ -133,6 +147,7 @@ class CodexProcessManager extends EventEmitter {
     this.lastError = null;
     this.stderrTail = '';
     this.graphClientTagByTurnId = new Map();
+    this.graphClientTagByThreadId = new Map();
     this.pendingGraphEventsByTurnId = new Map();
     this.pendingGraphStarts = 0;
   }
@@ -169,6 +184,7 @@ class CodexProcessManager extends EventEmitter {
     this.client?.stop();
     this.client = null;
     this.graphClientTagByTurnId.clear();
+    this.graphClientTagByThreadId.clear();
     this.pendingGraphEventsByTurnId.clear();
     this.pendingGraphStarts = 0;
     this.state = 'stopped';
@@ -235,6 +251,7 @@ class CodexProcessManager extends EventEmitter {
     const sourceThreadId = cleanString(args?.source?.threadId);
     const sourceTurnId = cleanString(args?.source?.turnId);
     const legacyHistory = normalizeInjectedHistory(args?.legacyHistory);
+    const permissions = codexPermissionSettings(args?.permissionMode);
 
     if (!clientTag) throw new Error('Graph turn client tag is required.');
     if (!cwd) throw new Error('Select a Codex working folder before sending.');
@@ -250,8 +267,8 @@ class CodexProcessManager extends EventEmitter {
     const threadOptions = {
       cwd,
       model,
-      sandbox: 'workspace-write',
-      approvalPolicy: 'on-request',
+      sandbox: permissions.sandbox,
+      approvalPolicy: permissions.approvalPolicy,
       ...(developerInstructions ? { developerInstructions } : {}),
     };
 
@@ -348,6 +365,7 @@ class CodexProcessManager extends EventEmitter {
       const turnId = cleanString(turnResult?.turn?.id);
       if (!turnId) throw new Error('Codex did not return a turn id.');
       this.graphClientTagByTurnId.set(turnId, clientTag);
+      this.graphClientTagByThreadId.set(threadId, clientTag);
       this.emit('event', {
         kind: 'graph-turn-associated',
         clientTag,
@@ -470,11 +488,17 @@ class CodexProcessManager extends EventEmitter {
 
   #emitCodexEvent(event) {
     const turnId = cleanString(event?.params?.turnId || event?.params?.turn?.id);
-    const clientTag = turnId ? this.graphClientTagByTurnId.get(turnId) : null;
+    const threadId = cleanString(event?.params?.threadId || event?.params?.thread?.id);
+    const clientTag =
+      (turnId ? this.graphClientTagByTurnId.get(turnId) : null) ||
+      (threadId ? this.graphClientTagByThreadId.get(threadId) : null);
     if (clientTag) {
       this.emit('event', { ...event, clientTag });
       if (event.kind === 'notification' && event.method === 'turn/completed') {
         this.graphClientTagByTurnId.delete(turnId);
+        if (threadId && this.graphClientTagByThreadId.get(threadId) === clientTag) {
+          this.graphClientTagByThreadId.delete(threadId);
+        }
       }
       return;
     }
@@ -493,6 +517,10 @@ class CodexProcessManager extends EventEmitter {
       this.emit('event', { ...event, clientTag, replayed: true });
       if (event.kind === 'notification' && event.method === 'turn/completed') {
         this.graphClientTagByTurnId.delete(turnId);
+        const threadId = cleanString(event?.params?.threadId || event?.params?.thread?.id);
+        if (threadId && this.graphClientTagByThreadId.get(threadId) === clientTag) {
+          this.graphClientTagByThreadId.delete(threadId);
+        }
       }
     }
   }
@@ -500,6 +528,7 @@ class CodexProcessManager extends EventEmitter {
 
 module.exports = {
   CodexProcessManager,
+  codexPermissionSettings,
   codexCandidates,
   findCodexBinary,
   windowsCodexCandidates,

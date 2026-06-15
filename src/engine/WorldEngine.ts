@@ -6397,6 +6397,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   private codexEventHasDetails(event: CodexEvent): boolean {
     if (typeof event.detail === 'string' && event.detail.trim()) return true;
     if (Array.isArray(event.files) && event.files.length > 0) return true;
+    if (Array.isArray(event.steps) && event.steps.length > 0) return true;
+    if (Array.isArray(event.terminalInput) && event.terminalInput.length > 0) return true;
+    if (event.tokenUsage) return true;
     if (event.arguments !== undefined) return true;
     return Boolean(event.cwd || event.path || Number.isFinite(event.durationMs) || Number.isFinite(event.exitCode));
   }
@@ -6409,20 +6412,53 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const statusColor =
       status === 'failed'
         ? 'rgba(248,113,113,0.96)'
+        : status === 'warning'
+          ? 'rgba(251,191,36,0.96)'
         : status === 'declined'
           ? 'rgba(251,191,36,0.94)'
           : status === 'in_progress'
             ? 'rgba(96,165,250,0.96)'
             : 'rgba(74,222,128,0.94)';
-    const statusGlyph = status === 'failed' ? '×' : status === 'declined' ? '−' : status === 'in_progress' ? '◌' : '✓';
+    const completedGlyph =
+      event.kind === 'context_compaction'
+        ? '~'
+        : event.kind === 'token_usage'
+          ? '#'
+          : event.kind === 'turn_diff' || event.kind === 'file_change'
+            ? '+'
+            : event.kind === 'model_reroute'
+              ? '>'
+              : event.kind === 'hook'
+                ? 'H'
+                : event.kind === 'plan'
+                  ? 'P'
+                  : 'v';
+    const statusGlyph =
+      status === 'failed'
+        ? 'x'
+        : status === 'warning'
+          ? '!'
+          : status === 'declined'
+            ? '-'
+            : status === 'in_progress'
+              ? 'o'
+              : completedGlyph;
     const detailToggle = hasDetails ? ` data-gcv1-codex-event-toggle="${escapeHtml(event.id)}"` : '';
     const cursor = hasDetails ? 'cursor:pointer;' : '';
-    const chevron = hasDetails ? (expanded ? '▾' : '▸') : '';
+    const chevron = hasDetails ? (expanded ? 'v' : '>') : '';
+    const background =
+      status === 'failed'
+        ? 'rgba(127,29,29,0.10)'
+        : status === 'warning' || status === 'declined'
+          ? 'rgba(120,53,15,0.10)'
+          : status === 'in_progress'
+            ? 'rgba(30,64,175,0.08)'
+            : 'rgba(255,255,255,0.025)';
     const parts: string[] = [];
 
     parts.push(
-      `<div${detailToggle} style="border:1px solid rgba(255,255,255,0.10);border-radius:7px;` +
-        `background:rgba(0,0,0,0.14);overflow:hidden;${cursor}">`,
+      `<div${detailToggle} style="border:1px solid rgba(255,255,255,0.09);border-radius:7px;` +
+        `background:${background};overflow:hidden;${cursor}">`,
     );
     parts.push(
       '<div style="min-height:30px;padding:6px 8px;display:flex;align-items:center;gap:8px;box-sizing:border-box;">' +
@@ -6455,12 +6491,50 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           );
           if (file.diff) {
             parts.push(
-              '<pre style="margin:0 0 8px;padding:8px;max-height:240px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+              '<pre style="margin:0 0 8px;padding:8px;white-space:pre-wrap;word-break:break-word;' +
                 'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
                 escapeHtml(file.diff) +
                 '</pre>',
             );
           }
+        }
+      }
+      if (Array.isArray(event.steps)) {
+        parts.push('<div style="display:flex;flex-direction:column;gap:5px;margin:0 0 8px;">');
+        for (const step of event.steps) {
+          const glyph = step.status === 'completed' ? 'v' : step.status === 'in_progress' ? 'o' : '-';
+          const color =
+            step.status === 'completed'
+              ? 'rgba(74,222,128,0.90)'
+              : step.status === 'in_progress'
+                ? 'rgba(96,165,250,0.96)'
+                : muted;
+          parts.push(
+            '<div style="display:flex;align-items:flex-start;gap:7px;">' +
+              `<span style="width:12px;flex:0 0 12px;color:${color};text-align:center;">${glyph}</span>` +
+              `<span style="flex:1;min-width:0;color:${secondary};white-space:pre-wrap;">${escapeHtml(step.step)}</span>` +
+              '</div>',
+          );
+        }
+        parts.push('</div>');
+      }
+      if (event.tokenUsage) {
+        const usage = event.tokenUsage;
+        const rows = [
+          Number.isFinite(usage.lastInputTokens) ? `Input: ${Number(usage.lastInputTokens).toLocaleString()}` : '',
+          Number.isFinite(usage.lastOutputTokens) ? `Output: ${Number(usage.lastOutputTokens).toLocaleString()}` : '',
+          Number.isFinite(usage.lastReasoningTokens)
+            ? `Reasoning: ${Number(usage.lastReasoningTokens).toLocaleString()}`
+            : '',
+          Number.isFinite(usage.totalTokens) ? `Thread total: ${Number(usage.totalTokens).toLocaleString()}` : '',
+          Number.isFinite(usage.modelContextWindow)
+            ? `Context window: ${Number(usage.modelContextWindow).toLocaleString()}`
+            : '',
+        ].filter(Boolean);
+        if (rows.length) {
+          parts.push(
+            `<div style="margin:0 0 8px;color:${muted};font-size:0.82em;white-space:pre-wrap;">${escapeHtml(rows.join('\n'))}</div>`,
+          );
         }
       }
       if (event.arguments !== undefined) {
@@ -6472,16 +6546,27 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         }
         if (argsText) {
           parts.push(
-            '<pre style="margin:0 0 8px;padding:8px;max-height:180px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+            '<pre style="margin:0 0 8px;padding:8px;white-space:pre-wrap;word-break:break-word;' +
               'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
               escapeHtml(argsText) +
               '</pre>',
           );
         }
       }
+      if (Array.isArray(event.terminalInput) && event.terminalInput.length) {
+        parts.push(
+          `<div style="margin:0 0 4px;color:${muted};font-size:0.78em;text-transform:uppercase;letter-spacing:0.04em;">Terminal input</div>`,
+        );
+        parts.push(
+          '<pre style="margin:0 0 8px;padding:8px;white-space:pre-wrap;word-break:break-word;' +
+            'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
+            escapeHtml(event.terminalInput.join('')) +
+            '</pre>',
+        );
+      }
       if (event.detail) {
         parts.push(
-          '<pre style="margin:0;padding:8px;max-height:280px;overflow:hidden;white-space:pre-wrap;word-break:break-word;' +
+          '<pre style="margin:0;padding:8px;white-space:pre-wrap;word-break:break-word;' +
             'border-radius:6px;background:rgba(0,0,0,0.22);font-size:0.78em;line-height:1.42;">' +
             escapeHtml(event.detail) +
             '</pre>',

@@ -4,6 +4,10 @@ import MarkdownMath from './MarkdownMath';
 import type { ModelInfo } from '../llm/registry';
 import type { ChatAttachment, InkStroke } from '../model/chat';
 import { getAttachment as getStoredAttachment } from '../storage/attachments';
+import {
+  CODEX_PERMISSION_OPTIONS,
+  type CodexPermissionMode,
+} from '../codex/permissions';
 
 type ResizeMode =
   | { kind: 'height' }
@@ -32,6 +36,8 @@ type Props = {
   modelId: string;
   modelOptions: ModelInfo[];
   onChangeModelId: (next: string) => void;
+  permissionMode: CodexPermissionMode;
+  onChangePermissionMode: (next: CodexPermissionMode) => void;
   webSearchEnabled: boolean;
   onChangeWebSearchEnabled: (next: boolean) => void;
   showWebSearch?: boolean;
@@ -217,7 +223,7 @@ function labelForAttachment(att: ChatAttachment): string {
 }
 
 export default function ChatComposer(props: Props) {
-  const { value, onChange, onSend, onSendInk, modelId, modelOptions, onChangeModelId, webSearchEnabled, onChangeWebSearchEnabled, showWebSearch = true, inkEnabled = true, sendAllEnabled, sendAllChecked, onChangeSendAllChecked, mode, onChangeMode, inkTool, inkStrokes, onChangeInkStrokes, containerRef, replyPreview, onCancelReply, contextSelections, onRemoveContextSelection, placeholder, sendDisabled, disabled, draftAttachments, onAddAttachmentFiles, onRemoveDraftAttachment, contextAttachments, selectedContextAttachmentKeys, onToggleContextAttachmentKey, minimized: minimizedProp, onChangeMinimized } = props;
+  const { value, onChange, onSend, onSendInk, modelId, modelOptions, onChangeModelId, permissionMode, onChangePermissionMode, webSearchEnabled, onChangeWebSearchEnabled, showWebSearch = true, inkEnabled = true, sendAllEnabled, sendAllChecked, onChangeSendAllChecked, mode, onChangeMode, inkTool, inkStrokes, onChangeInkStrokes, containerRef, replyPreview, onCancelReply, contextSelections, onRemoveContextSelection, placeholder, sendDisabled, disabled, draftAttachments, onAddAttachmentFiles, onRemoveDraftAttachment, contextAttachments, selectedContextAttachmentKeys, onToggleContextAttachmentKey, minimized: minimizedProp, onChangeMinimized } = props;
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const onSendRef = useRef(onSend);
@@ -321,6 +327,8 @@ export default function ChatComposer(props: Props) {
     const label = match?.shortLabel ?? match?.label ?? modelId;
     return String(label).trim();
   }, [modelId, modelOptions]);
+  const selectedPermission = CODEX_PERMISSION_OPTIONS.find((option) => option.id === permissionMode)
+    ?? CODEX_PERMISSION_OPTIONS[0];
 
   const modelMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const [modelMenuOpen, setModelMenuOpen] = useState(false);
@@ -1517,6 +1525,24 @@ export default function ChatComposer(props: Props) {
                 >
                   {selectedModelLabel}
                 </button>
+              </span>
+            </label>
+
+            <label className="composer__setting" title={`Permissions: ${selectedPermission.description}`}>
+              <span className="composer__selectWrap" data-value={selectedPermission.label}>
+                <select
+                  className="composer__select"
+                  value={permissionMode}
+                  onChange={(e) => onChangePermissionMode(e.currentTarget.value as CodexPermissionMode)}
+                  disabled={disabled}
+                  aria-label="Codex permissions"
+                >
+                  {CODEX_PERMISSION_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
               </span>
             </label>
 

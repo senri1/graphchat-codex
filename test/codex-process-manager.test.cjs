@@ -6,6 +6,7 @@ const test = require('node:test');
 
 const {
   CodexProcessManager,
+  codexPermissionSettings,
   codexCandidates,
   windowsCodexCandidates,
 } = require('../electron/codex/process-manager.cjs');
@@ -102,8 +103,8 @@ test('a new graph conversation starts a thread before starting its first turn', 
   assert.deepEqual(calls[0].params, {
     cwd,
     model: 'gpt-5.4',
-    sandbox: 'workspace-write',
-    approvalPolicy: 'on-request',
+    sandbox: 'danger-full-access',
+    approvalPolicy: 'never',
     developerInstructions: 'Use the current project.',
   });
   assert.deepEqual(calls[1].params, {
@@ -123,6 +124,55 @@ test('a new graph conversation starts a thread before starting its first turn', 
     forkedFromThreadId: null,
     forkedFromTurnId: null,
   });
+  assert.equal(manager.graphClientTagByTurnId.get('turn-new'), 'assistant-node');
+  assert.equal(manager.graphClientTagByThreadId.get('thread-new'), 'assistant-node');
+});
+
+test('Codex permission modes map to sandbox and approval settings', () => {
+  assert.deepEqual(codexPermissionSettings(undefined), {
+    mode: 'full-access',
+    sandbox: 'danger-full-access',
+    approvalPolicy: 'never',
+  });
+  assert.deepEqual(codexPermissionSettings('workspace-write'), {
+    mode: 'workspace-write',
+    sandbox: 'workspace-write',
+    approvalPolicy: 'on-request',
+  });
+  assert.deepEqual(codexPermissionSettings('read-only'), {
+    mode: 'read-only',
+    sandbox: 'read-only',
+    approvalPolicy: 'on-request',
+  });
+  assert.throws(() => codexPermissionSettings('unknown'), /Unsupported Codex permission mode/);
+});
+
+test('selected permissions are applied when resuming a Codex thread', async (t) => {
+  const { manager, cwd, calls } = createGraphTurnHarness(t, async (method) => {
+    if (method === 'thread/read') {
+      return {
+        thread: {
+          id: 'thread-1',
+          cwd,
+          status: { type: 'idle' },
+          turns: [{ id: 'turn-a' }],
+        },
+      };
+    }
+    if (method === 'thread/resume') return { thread: { id: 'thread-1' } };
+    if (method === 'turn/start') return { turn: { id: 'turn-b' } };
+    throw new Error(`Unexpected request: ${method}`);
+  });
+
+  await manager.startGraphTurn(
+    graphTurnArgs(cwd, {
+      permissionMode: 'read-only',
+      source: { threadId: 'thread-1', turnId: 'turn-a' },
+    }),
+  );
+
+  assert.equal(calls[1].params.sandbox, 'read-only');
+  assert.equal(calls[1].params.approvalPolicy, 'on-request');
 });
 
 test('continuing the newest source turn resumes the existing Codex thread', async (t) => {
