@@ -7,6 +7,7 @@ const {
   claudeCodeCandidates,
   claudeCodePermissionSettings,
   legacyHistoryContext,
+  normalizeClaudeCodeEffort,
   textDeltaFromStreamEvent,
   textFromContent,
   toolUsesFromAssistantMessage,
@@ -67,7 +68,8 @@ test('GraphChat permission modes map to Claude Code non-interactive modes', () =
 test('new Claude Code turns use print streaming and an explicit session id', () => {
   const args = buildClaudeCodeArgs({
     prompt: 'Fix the test',
-    model: 'sonnet',
+    model: 'claude-opus-4-8',
+    effort: 'xhigh',
     permissionMode: 'full-access',
     appendSystemPrompt: 'Use the current project.',
     sessionId: '550e8400-e29b-41d4-a716-446655440000',
@@ -80,10 +82,12 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
     '--verbose',
     '--include-partial-messages',
     '--model',
-    'sonnet',
+    'claude-opus-4-8',
     '--permission-mode',
     'bypassPermissions',
     '--dangerously-skip-permissions',
+    '--effort',
+    'xhigh',
     '--append-system-prompt',
     'Use the current project.',
     '--session-id',
@@ -92,10 +96,22 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
   ]);
 });
 
+test('Claude Code effort validation accepts every supported CLI level', () => {
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) {
+    assert.equal(normalizeClaudeCodeEffort(effort), effort);
+  }
+  assert.equal(normalizeClaudeCodeEffort(undefined), '');
+  assert.throws(
+    () => normalizeClaudeCodeEffort('minimal'),
+    /Unsupported Claude Code effort level: minimal/,
+  );
+});
+
 test('child graph turns resume and fork the selected parent session', () => {
   const args = buildClaudeCodeArgs({
     prompt: 'Now add coverage',
-    model: 'opus',
+    model: 'claude-sonnet-4-6',
+    effort: 'max',
     permissionMode: 'workspace-write',
     sourceSessionId: 'parent-session',
   });
@@ -104,6 +120,20 @@ test('child graph turns resume and fork the selected parent session', () => {
     'parent-session',
     '--fork-session',
     'Now add coverage',
+  ]);
+  assert.deepEqual(args.slice(0, 12), [
+    '--print',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--model',
+    'claude-sonnet-4-6',
+    '--permission-mode',
+    'acceptEdits',
+    '--effort',
+    'max',
+    '--resume',
   ]);
 });
 

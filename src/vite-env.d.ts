@@ -96,7 +96,7 @@ interface Window {
       cwd: string;
       prompt: string;
       model: string;
-      effort?: string;
+      effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
       permissionMode?: 'read-only' | 'workspace-write' | 'full-access';
       developerInstructions?: string;
       source?: { sessionId: string } | null;

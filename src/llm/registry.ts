@@ -22,6 +22,7 @@ export interface ModelInfo {
     verbosity?: TextVerbosity;
   };
   effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  claudeCodeEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   reasoningSummary?: boolean;
   thinkingLevel?: 'minimal' | 'low' | 'medium' | 'high';
 }

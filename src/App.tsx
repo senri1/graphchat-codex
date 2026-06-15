@@ -129,7 +129,10 @@ import {
 import {
   CLAUDE_CODE_MODELS,
   isClaudeCodeModel,
+  migrateClaudeCodeModelId,
+  type ClaudeCodeEffort,
 } from './claudeCode/models';
+import { mergeClaudeCodeResultText } from './claudeCode/streamText';
 import {
   DEFAULT_CODEX_PERMISSION_MODE,
   normalizeCodexPermissionMode,
@@ -249,6 +252,7 @@ type GenerationJob = {
   claudeCodeSessionId?: string | null;
   claudeCodeCwd?: string | null;
   claudeCodeModel?: string | null;
+  claudeCodeEffort?: ClaudeCodeEffort;
   claudeCodeForkedFromSessionId?: string | null;
   claudeCodeSawTextDelta?: boolean;
 };
@@ -257,6 +261,7 @@ type ClaudeCodeConversationRef = {
   sessionId: string;
   cwd: string;
   model?: string;
+  effort?: ClaudeCodeEffort;
   forkedFromSessionId?: string;
 };
 
@@ -267,6 +272,14 @@ function normalizeClaudeCodeConversationRef(value: unknown): ClaudeCodeConversat
   const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId.trim() : '';
   const cwd = typeof raw.cwd === 'string' ? raw.cwd.trim() : '';
   const model = typeof raw.model === 'string' ? raw.model.trim() : '';
+  const effort =
+    raw.effort === 'low' ||
+    raw.effort === 'medium' ||
+    raw.effort === 'high' ||
+    raw.effort === 'xhigh' ||
+    raw.effort === 'max'
+      ? raw.effort
+      : undefined;
   const forkedFromSessionId =
     typeof raw.forkedFromSessionId === 'string' && raw.forkedFromSessionId.trim()
       ? raw.forkedFromSessionId.trim()
@@ -276,6 +289,7 @@ function normalizeClaudeCodeConversationRef(value: unknown): ClaudeCodeConversat
     sessionId,
     cwd,
     ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
     ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
   };
 }
@@ -4144,7 +4158,7 @@ export default function App() {
   useEffect(() => {
     if (!composerModelOptions.length || !defaultCodexComposerModelId) return;
     const meta = chatMetaRef.current.get(activeChatId);
-    const requested = meta?.llm.modelId || composerModelId;
+    const requested = migrateClaudeCodeModelId(meta?.llm.modelId || composerModelId);
     const resolved = resolveCodexComposerModelId(
       requested,
       composerModelOptions,
@@ -4623,6 +4637,7 @@ export default function App() {
     const sessionId = String(job.claudeCodeSessionId ?? '').trim();
     const cwd = String(job.claudeCodeCwd ?? '').trim();
     const model = String(job.claudeCodeModel ?? '').trim();
+    const effort = job.claudeCodeEffort;
     const forkedFromSessionId = String(job.claudeCodeForkedFromSessionId ?? '').trim();
     if (!sessionId || !cwd) return null;
 
@@ -4630,6 +4645,7 @@ export default function App() {
       sessionId,
       cwd,
       ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
       ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
     };
     const canonicalMeta = {
@@ -5336,6 +5352,7 @@ export default function App() {
       claudeCodeSessionId: null,
       claudeCodeCwd: workingFolder,
       claudeCodeModel: modelInfo.apiModel,
+      claudeCodeEffort: modelInfo.claudeCodeEffort,
       claudeCodeForkedFromSessionId: sourceResolution.source?.sessionId ?? null,
       claudeCodeSawTextDelta: false,
     };
@@ -5368,6 +5385,7 @@ export default function App() {
         cwd: workingFolder,
         prompt,
         model: modelInfo.apiModel,
+        ...(modelInfo.claudeCodeEffort ? { effort: modelInfo.claudeCodeEffort } : {}),
         permissionMode: normalizeCodexPermissionMode(meta.codexPermissionMode),
         developerInstructions: conversationContextDeveloperInstructions(
           args.systemInstruction,
@@ -5455,7 +5473,7 @@ export default function App() {
           String(event.operationId ?? '').trim() || job.claudeCodeOperationId;
         job.claudeCodeSessionId = String(event.sessionId ?? '').trim() || job.claudeCodeSessionId;
         const resultText = typeof event.result === 'string' ? event.result : '';
-        if (resultText.trim()) job.fullText = resultText;
+        job.fullText = mergeClaudeCodeResultText(job.fullText, resultText);
         const ref = persistClaudeCodeJobRef(job);
         const completed = event.status === 'completed';
         const interrupted = event.status === 'interrupted';
@@ -7783,7 +7801,7 @@ export default function App() {
     }
     setComposerModelId(
       resolveCodexComposerModelId(
-        meta.llm.modelId,
+        migrateClaudeCodeModelId(meta.llm.modelId),
         composerModelOptionsRef.current,
         defaultCodexComposerModelIdRef.current,
       ) ??
@@ -7997,7 +8015,7 @@ export default function App() {
     }
     setComposerModelId(
       resolveCodexComposerModelId(
-        meta.llm.modelId,
+        migrateClaudeCodeModelId(meta.llm.modelId),
         composerModelOptionsRef.current,
         defaultCodexComposerModelIdRef.current,
       ) ??
@@ -10834,7 +10852,7 @@ export default function App() {
   const applyComposerModelSelection = React.useCallback(
     (nextModelId: string) => {
       const value = resolveCodexComposerModelId(
-        nextModelId,
+        migrateClaudeCodeModelId(nextModelId),
         composerModelOptionsRef.current,
         defaultCodexComposerModelIdRef.current,
       );

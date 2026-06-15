@@ -96,6 +96,15 @@ function claudeCodePermissionSettings(value) {
   throw new Error(`Unsupported Claude Code permission mode: ${mode}`);
 }
 
+const CLAUDE_CODE_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+function normalizeClaudeCodeEffort(value) {
+  const effort = cleanString(value).toLowerCase();
+  if (!effort) return '';
+  if (CLAUDE_CODE_EFFORT_LEVELS.has(effort)) return effort;
+  throw new Error(`Unsupported Claude Code effort level: ${effort}`);
+}
+
 function textFromContent(content) {
   if (!Array.isArray(content)) return '';
   return content
@@ -148,7 +157,7 @@ function buildClaudeCodeArgs(args) {
   const sourceSessionId = cleanString(args?.sourceSessionId);
   const sessionId = cleanString(args?.sessionId);
   const appendSystemPrompt = cleanString(args?.appendSystemPrompt);
-  const effort = cleanString(args?.effort);
+  const effort = normalizeClaudeCodeEffort(args?.effort);
   const permissions = claudeCodePermissionSettings(args?.permissionMode);
 
   if (!prompt) throw new Error('A text prompt is required.');
@@ -473,6 +482,7 @@ module.exports = {
   ClaudeCodeProcessManager,
   buildClaudeCodeArgs,
   claudeCodeCandidates,
+  normalizeClaudeCodeEffort,
   claudeCodePermissionSettings,
   findClaudeCodeBinary,
   legacyHistoryContext,
