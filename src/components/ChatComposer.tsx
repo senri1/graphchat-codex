@@ -1535,7 +1535,7 @@ export default function ChatComposer(props: Props) {
                   value={permissionMode}
                   onChange={(e) => onChangePermissionMode(e.currentTarget.value as CodexPermissionMode)}
                   disabled={disabled}
-                  aria-label="Codex permissions"
+                  aria-label="Agent permissions"
                 >
                   {CODEX_PERMISSION_OPTIONS.map((option) => (
                     <option key={option.id} value={option.id}>

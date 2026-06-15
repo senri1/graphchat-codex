@@ -5,6 +5,7 @@ export type TextVerbosity = 'low' | 'medium' | 'high';
 export interface ModelInfo {
   id: string; // UI/model id used in the app (e.g. 'gpt-4o-mini')
   provider: ProviderId;
+  runtime?: 'api' | 'codex' | 'claude-code';
   apiModel: string; // provider model name (e.g. 'gpt-4o-mini')
   label: string;
   shortLabel?: string;

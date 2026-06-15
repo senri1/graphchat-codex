@@ -31,6 +31,24 @@ contextBridge.exposeInMainWorld('gcElectron', {
       ipcRenderer.removeListener('codex:event', listener);
     };
   },
+  claudeCodeStatus: () => ipcRenderer.invoke('claude-code:status'),
+  claudeCodeRestart: () => ipcRenderer.invoke('claude-code:restart'),
+  claudeCodeGraphTurnStart: (req) => ipcRenderer.invoke('claude-code:graph-turn-start', req ?? {}),
+  claudeCodeTurnInterrupt: (req) => ipcRenderer.invoke('claude-code:turn-interrupt', req ?? {}),
+  claudeCodeOnEvent: (cb) => {
+    if (typeof cb !== 'function') return () => {};
+    const listener = (_event, payload) => {
+      try {
+        cb(payload);
+      } catch {
+        // ignore listener errors
+      }
+    };
+    ipcRenderer.on('claude-code:event', listener);
+    return () => {
+      ipcRenderer.removeListener('claude-code:event', listener);
+    };
+  },
   compileLatex: (req) => ipcRenderer.invoke('latex:compile', req ?? {}),
   pickLatexProject: () => ipcRenderer.invoke('latex:pick-project'),
   listLatexProjectFiles: (req) => ipcRenderer.invoke('latex:list-project-files', req ?? {}),

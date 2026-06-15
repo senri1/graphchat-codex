@@ -394,6 +394,25 @@ GraphChat Codex is intentionally local-only. Cloud-folder and direct Google
 Drive sync controls are not exposed because working folders and native Codex
 thread state are machine-specific. Use local exports and backups for recovery.
 
+## Claude Code CLI
+
+When Claude Code is installed, the composer also offers `Claude Sonnet`,
+`Claude Opus`, and `Claude Haiku`. These choices launch the local `claude`
+executable in print mode with streaming JSON, so they use the same Claude Code
+login, project settings, `CLAUDE.md`, tools, hooks, and MCP configuration as the
+CLI.
+
+Each GraphChat response stores its Claude Code session ID. A reply forks that
+stored session before sending the next prompt, which keeps graph branches
+independent instead of advancing a shared linear session. Text output streams
+into the assistant node and Stop terminates the underlying CLI process.
+
+Claude Code discovery checks `GRAPHCHAT_CLAUDE_CODE_BINARY`, the native
+`~/.local/bin/claude` installation, npm and WinGet locations on Windows, and
+`PATH`. Attachment input and interactive permission prompts are not connected;
+use the composer permission selector. `Full access` maps to Claude Code's
+permission bypass mode.
+
 ## Running From Source
 
 Prerequisites:
@@ -401,6 +420,8 @@ Prerequisites:
 - Node.js and npm.
 - A working Codex installation, or `GRAPHCHAT_CODEX_BINARY` pointing to a Codex
   executable that supports `app-server`.
+- Optional: a working Claude Code installation, or
+  `GRAPHCHAT_CLAUDE_CODE_BINARY` pointing to the `claude` executable.
 
 Install:
 

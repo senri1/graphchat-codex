@@ -127,6 +127,10 @@ import {
   type CodexRuntimeModel,
 } from './codex/models';
 import {
+  CLAUDE_CODE_MODELS,
+  isClaudeCodeModel,
+} from './claudeCode/models';
+import {
   DEFAULT_CODEX_PERMISSION_MODE,
   normalizeCodexPermissionMode,
   type CodexPermissionMode,
@@ -231,7 +235,7 @@ type GenerationJob = {
   lastFlushAt: number;
   flushTimer: number | null;
   closed: boolean;
-  runtime?: 'api' | 'codex';
+  runtime?: 'api' | 'codex' | 'claude-code';
   codexThreadId?: string | null;
   codexTurnId?: string | null;
   codexCwd?: string | null;
@@ -241,7 +245,40 @@ type GenerationJob = {
   codexForkedFromTurnId?: string | null;
   codexThreadOrigin?: CodexThreadLinkOrigin;
   codexTimeline?: CodexTimelineItem[];
+  claudeCodeOperationId?: string | null;
+  claudeCodeSessionId?: string | null;
+  claudeCodeCwd?: string | null;
+  claudeCodeModel?: string | null;
+  claudeCodeForkedFromSessionId?: string | null;
+  claudeCodeSawTextDelta?: boolean;
 };
+
+type ClaudeCodeConversationRef = {
+  sessionId: string;
+  cwd: string;
+  model?: string;
+  forkedFromSessionId?: string;
+};
+
+function normalizeClaudeCodeConversationRef(value: unknown): ClaudeCodeConversationRef | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as any;
+  if (raw.runtime !== 'claude-code') return null;
+  const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId.trim() : '';
+  const cwd = typeof raw.cwd === 'string' ? raw.cwd.trim() : '';
+  const model = typeof raw.model === 'string' ? raw.model.trim() : '';
+  const forkedFromSessionId =
+    typeof raw.forkedFromSessionId === 'string' && raw.forkedFromSessionId.trim()
+      ? raw.forkedFromSessionId.trim()
+      : undefined;
+  if (!sessionId || !cwd) return null;
+  return {
+    sessionId,
+    cwd,
+    ...(model ? { model } : {}),
+    ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
+  };
+}
 
 function normalizeCodexConversationRef(value: unknown): CodexConversationRef | null {
   if (!value || typeof value !== 'object') return null;
@@ -305,6 +342,25 @@ function isLegacyContinuationEndpoint(
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
   return Boolean(meta.legacyImport?.source === 'graphchatv1' && isLegacyContinuationNode(node));
+}
+
+function resolveClaudeCodeSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
+  source: ClaudeCodeConversationRef | null;
+  parentNodeId: string | null;
+} {
+  const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
+  if (isEditableDocumentNode(userNode)) return { source: null, parentNodeId: null };
+  const parentNodeId =
+    typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
+  if (!parentNodeId) return { source: null, parentNodeId: null };
+  const parent = nodes.find((node) => node.id === parentNodeId) ?? null;
+  if (!parent || parent.kind !== 'text' || parent.author !== 'assistant') {
+    return { source: null, parentNodeId };
+  }
+  return {
+    source: normalizeClaudeCodeConversationRef(parent.canonicalMeta),
+    parentNodeId,
+  };
 }
 
 function conversationContextDeveloperInstructions(base: string, cwd: string, chatId: string): string {
@@ -4050,9 +4106,13 @@ export default function App() {
     if (!api?.codexModelList) return;
     let cancelled = false;
 
-    void api
-      .codexModelList()
-      .then((response) => {
+    void Promise.all([
+      api.codexModelList(),
+      typeof api.claudeCodeStatus === 'function'
+        ? api.claudeCodeStatus().catch(() => null)
+        : Promise.resolve(null),
+    ])
+      .then(([response, claudeCodeResponse]) => {
         if (cancelled) return;
         if (!response?.ok) throw new Error(response?.error || 'Failed to list Codex models.');
         const runtimeModels = Array.isArray(response.result?.data)
@@ -4062,9 +4122,13 @@ export default function App() {
         if (!built.models.length || !built.defaultModelId) {
           throw new Error('Codex did not report any supported models.');
         }
-        composerModelOptionsRef.current = built.models;
+        const claudeCodeReady = Boolean(claudeCodeResponse?.ok && claudeCodeResponse.status?.ready);
+        const models = claudeCodeReady
+          ? [...built.models, ...CLAUDE_CODE_MODELS.map((model) => ({ ...model }))]
+          : built.models;
+        composerModelOptionsRef.current = models;
         defaultCodexComposerModelIdRef.current = built.defaultModelId;
-        setComposerModelOptions(built.models);
+        setComposerModelOptions(models);
         setDefaultCodexComposerModelId(built.defaultModelId);
       })
       .catch((error: any) => {
@@ -4555,6 +4619,30 @@ export default function App() {
     return codexRef;
   };
 
+  const persistClaudeCodeJobRef = (job: GenerationJob): ClaudeCodeConversationRef | null => {
+    const sessionId = String(job.claudeCodeSessionId ?? '').trim();
+    const cwd = String(job.claudeCodeCwd ?? '').trim();
+    const model = String(job.claudeCodeModel ?? '').trim();
+    const forkedFromSessionId = String(job.claudeCodeForkedFromSessionId ?? '').trim();
+    if (!sessionId || !cwd) return null;
+
+    const ref: ClaudeCodeConversationRef = {
+      sessionId,
+      cwd,
+      ...(model ? { model } : {}),
+      ...(forkedFromSessionId ? { forkedFromSessionId } : {}),
+    };
+    const canonicalMeta = {
+      runtime: 'claude-code',
+      ...ref,
+    };
+    updateStoredTextNode(job.chatId, job.assistantNodeId, { canonicalMeta });
+    if (activeChatIdRef.current === job.chatId) {
+      engineRef.current?.setTextNodeCanonical(job.assistantNodeId, { canonicalMeta });
+    }
+    return ref;
+  };
+
   const finishJob = (
     assistantNodeId: string,
     result: {
@@ -4648,6 +4736,24 @@ export default function App() {
         });
         if (threadId && turnId && window.gcElectron?.codexTurnInterrupt) {
           void window.gcElectron.codexTurnInterrupt({ threadId, turnId });
+        }
+        return;
+      }
+      if (job.runtime === 'claude-code') {
+        const operationId = String(job.claudeCodeOperationId ?? '').trim();
+        persistClaudeCodeJobRef(job);
+        try {
+          job.abortController.abort();
+        } catch {
+          // ignore
+        }
+        finishJob(assistantNodeId, {
+          finalText: job.fullText,
+          error: 'Canceled',
+          cancelled: true,
+        });
+        if (operationId && window.gcElectron?.claudeCodeTurnInterrupt) {
+          void window.gcElectron.claudeCodeTurnInterrupt({ operationId });
         }
         return;
       }
@@ -5055,6 +5161,347 @@ export default function App() {
       }
     });
   }, []);
+
+  const startClaudeCodeGeneration = (args: {
+    chatId: string;
+    userNodeId: string;
+    assistantNodeId: string;
+    modelId: string;
+    systemInstruction: string;
+  }) => {
+    const api = window.gcElectron;
+    if (!api?.claudeCodeGraphTurnStart || !api.claudeCodeOnEvent) {
+      const message = 'Claude Code conversations require the Electron desktop app and Claude Code CLI.';
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        content: message,
+        isGenerating: false,
+        llmError: message,
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        engineRef.current?.setTextNodeLlmState(args.assistantNodeId, {
+          isGenerating: false,
+          modelId: args.modelId,
+          llmError: message,
+        });
+      }
+      return;
+    }
+    if (generationJobsByAssistantIdRef.current.has(args.assistantNodeId)) return;
+
+    const state = chatStatesRef.current.get(args.chatId);
+    const userNode =
+      state?.nodes.find(
+        (node): node is Extract<ChatNode, { kind: 'text' }> =>
+          node.kind === 'text' && node.author === 'user' && node.id === args.userNodeId,
+      ) ?? null;
+    const userText = typeof userNode?.content === 'string' ? userNode.content.trim() : '';
+    const prompt = (() => {
+      if (!userNode) return '';
+      const parts: string[] = [];
+      const replyTo =
+        typeof userNode.userPreface?.replyTo === 'string' ? userNode.userPreface.replyTo.trim() : '';
+      if (replyTo) parts.push(`Selected context to reply to:\n${replyTo}`);
+      const contexts = Array.isArray(userNode.userPreface?.contexts)
+        ? userNode.userPreface.contexts.map((text) => String(text ?? '').trim()).filter(Boolean)
+        : [];
+      if (contexts.length) {
+        parts.push(contexts.map((text, index) => `Additional context ${index + 1}:\n${text}`).join('\n\n'));
+      }
+      if (userText) parts.push(userText);
+      return parts.join('\n\n');
+    })();
+    if (!state || !userNode || !prompt) {
+      const message = 'Claude Code currently requires a non-empty text prompt.';
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        content: message,
+        isGenerating: false,
+        llmError: message,
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+      }
+      return;
+    }
+    if (Array.isArray(userNode.attachments) && userNode.attachments.length > 0) {
+      const message = 'Claude Code attachment input is not connected yet. Send a text-only turn.';
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        content: message,
+        isGenerating: false,
+        llmError: message,
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+      }
+      return;
+    }
+
+    const meta = ensureChatMeta(args.chatId);
+    const workingFolder = String(meta.codexWorkingFolderPath ?? '').trim();
+    if (!workingFolder) {
+      const message = 'Choose a working folder for this chat before sending.';
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        content: message,
+        isGenerating: false,
+        llmError: message,
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+      }
+      showToast(message, 'error', 5200);
+      return;
+    }
+
+    const sourceResolution = resolveClaudeCodeSourceForUserNode(state.nodes, args.userNodeId);
+    let legacyHistory: CodexInjectedMessage[] = [];
+    if (sourceResolution.parentNodeId && !sourceResolution.source) {
+      const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
+      if (!isLegacyContinuationNode(parentNode) && !isEditableDocumentNode(parentNode)) {
+        const message = 'Reply from a completed response or editable document to start a Claude Code branch.';
+        updateStoredTextNode(args.chatId, args.assistantNodeId, {
+          content: message,
+          isGenerating: false,
+          llmError: message,
+        });
+        if (activeChatIdRef.current === args.chatId) {
+          engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        }
+        showToast(message, 'error', 5200);
+        return;
+      }
+      try {
+        legacyHistory = buildLegacyHistory(state.nodes, parentNode.id);
+      } catch (error: any) {
+        const message = error?.message || 'Failed to build the GraphChat branch history.';
+        updateStoredTextNode(args.chatId, args.assistantNodeId, {
+          content: message,
+          isGenerating: false,
+          llmError: message,
+        });
+        if (activeChatIdRef.current === args.chatId) {
+          engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        }
+        showToast(message, 'error', 6200);
+        return;
+      }
+    }
+    if (sourceResolution.source && sourceResolution.source.cwd !== workingFolder) {
+      const message = 'This Claude Code branch belongs to a different working folder.';
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        content: message,
+        isGenerating: false,
+        llmError: message,
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+      }
+      showToast(message, 'error', 6200);
+      return;
+    }
+
+    const modelInfo = composerModelOptionsRef.current.find((model) => model.id === args.modelId) ?? null;
+    if (!isClaudeCodeModel(modelInfo)) {
+      const message = 'Select a Claude Code model.';
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        content: message,
+        isGenerating: false,
+        llmError: message,
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+      }
+      return;
+    }
+
+    const llmParams = { webSearchEnabled: false };
+    const job: GenerationJob = {
+      chatId: args.chatId,
+      userNodeId: args.userNodeId,
+      assistantNodeId: args.assistantNodeId,
+      modelId: args.modelId,
+      llmParams,
+      startedAt: Date.now(),
+      abortController: new AbortController(),
+      background: false,
+      taskId: null,
+      lastEventSeq: null,
+      fullText: '',
+      thinkingSummary: [],
+      lastFlushedText: '',
+      lastFlushAt: 0,
+      flushTimer: null,
+      closed: false,
+      runtime: 'claude-code',
+      claudeCodeOperationId: null,
+      claudeCodeSessionId: null,
+      claudeCodeCwd: workingFolder,
+      claudeCodeModel: modelInfo.apiModel,
+      claudeCodeForkedFromSessionId: sourceResolution.source?.sessionId ?? null,
+      claudeCodeSawTextDelta: false,
+    };
+    generationJobsByAssistantIdRef.current.set(job.assistantNodeId, job);
+    updateStoredTextNode(args.chatId, args.assistantNodeId, {
+      isGenerating: true,
+      modelId: args.modelId,
+      llmParams,
+      llmError: null,
+      llmTask: { provider: 'claude-code', kind: 'turn', cancelable: true },
+      codexTimeline: undefined,
+      codexEvents: undefined,
+    });
+    if (activeChatIdRef.current === args.chatId) {
+      engineRef.current?.setTextNodeLlmState(args.assistantNodeId, {
+        isGenerating: true,
+        modelId: args.modelId,
+        llmParams,
+        llmError: null,
+        llmTask: { provider: 'claude-code', kind: 'turn', cancelable: true },
+      });
+      engineRef.current?.setTextNodeCodexTimeline(args.assistantNodeId, undefined);
+      engineRef.current?.setTextNodeCodexEvents(args.assistantNodeId, undefined);
+    }
+    schedulePersistSoon();
+
+    void (async () => {
+      const response = await api.claudeCodeGraphTurnStart({
+        clientTag: job.assistantNodeId,
+        cwd: workingFolder,
+        prompt,
+        model: modelInfo.apiModel,
+        permissionMode: normalizeCodexPermissionMode(meta.codexPermissionMode),
+        developerInstructions: conversationContextDeveloperInstructions(
+          args.systemInstruction,
+          workingFolder,
+          args.chatId,
+        ),
+        source: sourceResolution.source ? { sessionId: sourceResolution.source.sessionId } : null,
+        ...(legacyHistory.length ? { legacyHistory } : {}),
+      });
+      if (!response?.ok || !response.result) {
+        if (job.closed) return;
+        finishJob(job.assistantNodeId, {
+          finalText: job.fullText,
+          error: response?.error || 'Failed to start the Claude Code turn.',
+        });
+        return;
+      }
+      job.claudeCodeOperationId = response.result.operationId;
+      job.claudeCodeSessionId = response.result.sessionId;
+      job.claudeCodeForkedFromSessionId = response.result.forkedFromSessionId ?? null;
+      persistClaudeCodeJobRef(job);
+      if (job.closed) return;
+      updateStoredTextNode(args.chatId, args.assistantNodeId, {
+        llmTask: {
+          provider: 'claude-code',
+          kind: 'turn',
+          taskId: response.result.operationId,
+          cancelable: true,
+        },
+      });
+      if (activeChatIdRef.current === args.chatId) {
+        engineRef.current?.setTextNodeLlmState(args.assistantNodeId, {
+          llmTask: {
+            provider: 'claude-code',
+            kind: 'turn',
+            taskId: response.result.operationId,
+            cancelable: true,
+          },
+        });
+      }
+      schedulePersistSoon();
+    })();
+  };
+
+  useEffect(() => {
+    const api = window.gcElectron;
+    if (!api?.claudeCodeOnEvent) return;
+    return api.claudeCodeOnEvent((event: any) => {
+      const clientTag = typeof event?.clientTag === 'string' ? event.clientTag.trim() : '';
+      if (!clientTag) return;
+      const job = generationJobsByAssistantIdRef.current.get(clientTag);
+      if (!job || job.closed || job.runtime !== 'claude-code') return;
+
+      if (event.kind === 'graph-turn-associated') {
+        job.claudeCodeOperationId =
+          String(event.operationId ?? '').trim() || job.claudeCodeOperationId;
+        job.claudeCodeSessionId = String(event.sessionId ?? '').trim() || job.claudeCodeSessionId;
+        job.claudeCodeForkedFromSessionId =
+          String(event.forkedFromSessionId ?? '').trim() || job.claudeCodeForkedFromSessionId;
+        persistClaudeCodeJobRef(job);
+        schedulePersistSoon();
+        return;
+      }
+
+      if (event.kind === 'text-delta') {
+        const delta = typeof event.delta === 'string' ? event.delta : '';
+        if (!delta) return;
+        job.claudeCodeSawTextDelta = true;
+        job.fullText += delta;
+        scheduleJobFlush(job);
+        return;
+      }
+
+      if (event.kind === 'assistant-message') {
+        if (job.claudeCodeSawTextDelta) return;
+        const text = typeof event.text === 'string' ? event.text.trim() : '';
+        if (!text) return;
+        job.fullText = job.fullText.trim() ? `${job.fullText.trim()}\n\n${text}` : text;
+        scheduleJobFlush(job);
+        return;
+      }
+
+      if (event.kind === 'turn-completed') {
+        job.claudeCodeOperationId =
+          String(event.operationId ?? '').trim() || job.claudeCodeOperationId;
+        job.claudeCodeSessionId = String(event.sessionId ?? '').trim() || job.claudeCodeSessionId;
+        const resultText = typeof event.result === 'string' ? event.result : '';
+        if (resultText.trim()) job.fullText = resultText;
+        const ref = persistClaudeCodeJobRef(job);
+        const completed = event.status === 'completed';
+        const interrupted = event.status === 'interrupted';
+        const error = completed
+          ? null
+          : typeof event.error === 'string' && event.error.trim()
+            ? event.error.trim()
+            : interrupted
+              ? 'Canceled'
+              : 'Claude Code turn failed.';
+        finishJob(job.assistantNodeId, {
+          finalText: job.fullText,
+          error,
+          cancelled: interrupted,
+          canonicalMessage: job.fullText.trim()
+            ? { role: 'assistant', text: job.fullText.trim() }
+            : undefined,
+          canonicalMeta: ref
+            ? {
+                runtime: 'claude-code',
+                ...ref,
+                usage: event.usage ?? undefined,
+                costUsd: event.costUsd ?? undefined,
+              }
+            : undefined,
+        });
+      }
+    });
+  }, []);
+
+  const startLocalCliGeneration = (args: {
+    chatId: string;
+    userNodeId: string;
+    assistantNodeId: string;
+    modelId: string;
+    systemInstruction: string;
+  }) => {
+    const modelInfo =
+      composerModelOptionsRef.current.find((model) => model.id === args.modelId) ??
+      getModelInfo(args.modelId);
+    if (isClaudeCodeModel(modelInfo)) {
+      startClaudeCodeGeneration(args);
+      return;
+    }
+    startCodexGeneration(args);
+  };
 
   const startOpenAIGeneration = (args: {
     chatId: string;
@@ -6695,6 +7142,18 @@ export default function App() {
 	        }
           if (taskProvider === 'codex') {
             const msg = 'Interrupted when GraphChat closed. Reply from the previous completed Codex response to continue.';
+            updateStoredTextNode(chatId, textNode.id, { isGenerating: false, llmError: msg, llmTask: undefined });
+            if (activeChatIdRef.current === chatId) {
+              engineRef.current?.setTextNodeLlmState(textNode.id, {
+                isGenerating: false,
+                llmError: msg,
+                llmTask: null,
+              } as any);
+            }
+            continue;
+          }
+          if (taskProvider === 'claude-code') {
+            const msg = 'Interrupted when GraphChat closed. Reply from this Claude Code response to continue.';
             updateStoredTextNode(chatId, textNode.id, { isGenerating: false, llmError: msg, llmTask: undefined });
             if (activeChatIdRef.current === chatId) {
               engineRef.current?.setTextNodeLlmState(textNode.id, {
@@ -9482,13 +9941,17 @@ export default function App() {
     if (!raw.trim() && composerDraftAttachments.length === 0 && !hasPreface) return null;
 
     const selectedModelId = String(args.modelIdOverride || composerModelId || DEFAULT_MODEL_ID).trim() || DEFAULT_MODEL_ID;
+    const selectedModelInfo =
+      composerModelOptionsRef.current.find((model) => model.id === selectedModelId) ??
+      getModelInfo(selectedModelId);
     const assistantTitle = (() => {
-      const info = getModelInfo(selectedModelId);
-      const shortLabel = typeof info?.shortLabel === 'string' ? info.shortLabel.trim() : '';
+      const shortLabel =
+        typeof selectedModelInfo?.shortLabel === 'string' ? selectedModelInfo.shortLabel.trim() : '';
       if (shortLabel) return shortLabel;
-      const label = typeof info?.label === 'string' ? info.label.trim() : '';
+      const label = typeof selectedModelInfo?.label === 'string' ? selectedModelInfo.label.trim() : '';
       return label || 'Assistant';
     })();
+    const claudeCodeSelected = isClaudeCodeModel(selectedModelInfo);
 
     const chatId = activeChatIdRef.current;
     const meta = ensureChatMeta(chatId);
@@ -9526,13 +9989,21 @@ export default function App() {
     }
     if (desiredParentId) {
       const parentNode = engine.exportChatState().nodes.find((node) => node.id === desiredParentId) ?? null;
-      const parentRef =
-        parentNode?.kind === 'text' && parentNode.author === 'assistant'
+      const parentRef = claudeCodeSelected
+        ? parentNode?.kind === 'text' && parentNode.author === 'assistant'
+          ? normalizeClaudeCodeConversationRef(parentNode.canonicalMeta)
+          : null
+        : parentNode?.kind === 'text' && parentNode.author === 'assistant'
           ? normalizeCodexConversationRef(parentNode.codexRef)
           : null;
-      if (!parentRef && !isLegacyContinuationEndpoint(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+      const validHistoryEndpoint = claudeCodeSelected
+        ? isLegacyContinuationNode(parentNode)
+        : isLegacyContinuationEndpoint(meta, parentNode);
+      if (!parentRef && !validHistoryEndpoint && !isEditableDocumentNode(parentNode)) {
         showToast(
-          'To continue or branch, reply from an editable document, a completed or stopped Codex response, or an imported GraphChatV1 response.',
+          claudeCodeSelected
+            ? 'To continue or branch with Claude Code, reply from an editable document or completed response.'
+            : 'To continue or branch, reply from an editable document, a completed or stopped Codex response, or an imported GraphChatV1 response.',
           'error',
           5200,
         );
@@ -9617,7 +10088,7 @@ export default function App() {
     const snapshot = engine.exportChatState();
     chatStatesRef.current.set(chatId, snapshot);
 
-    startCodexGeneration({
+    startLocalCliGeneration({
       chatId,
       userNodeId: res.userNodeId,
       assistantNodeId: res.assistantNodeId,
@@ -9664,15 +10135,19 @@ export default function App() {
     const hasPreface = Boolean(replyTo || contextTexts.length > 0);
 
     const selectedModelId = String(args.modelIdOverride || composerModelId || DEFAULT_MODEL_ID).trim() || DEFAULT_MODEL_ID;
+    const selectedModelInfo =
+      composerModelOptionsRef.current.find((model) => model.id === selectedModelId) ??
+      getModelInfo(selectedModelId);
     const assistantTitle = (() => {
-      const info = getModelInfo(selectedModelId);
-      const shortLabel = typeof info?.shortLabel === 'string' ? info.shortLabel.trim() : '';
+      const shortLabel =
+        typeof selectedModelInfo?.shortLabel === 'string' ? selectedModelInfo.shortLabel.trim() : '';
       if (shortLabel) return shortLabel;
-      const label = typeof info?.label === 'string' ? info.label.trim() : '';
+      const label = typeof selectedModelInfo?.label === 'string' ? selectedModelInfo.label.trim() : '';
       return label || 'Assistant';
     })();
+    const claudeCodeSelected = isClaudeCodeModel(selectedModelInfo);
 
-    const modelInfo = getModelInfo(selectedModelId);
+    const modelInfo = selectedModelInfo;
     if (modelInfo && modelInfo.supportsImageInput === false) {
       showToast('Selected model does not support image input.', 'error');
       return null;
@@ -9934,13 +10409,17 @@ export default function App() {
     const composerContextTexts = (contextSelections ?? []).map((t) => String(t ?? '').trim()).filter(Boolean);
 
     const selectedModelId = String(args.modelIdOverride || composerModelId || DEFAULT_MODEL_ID).trim() || DEFAULT_MODEL_ID;
+    const selectedModelInfo =
+      composerModelOptionsRef.current.find((model) => model.id === selectedModelId) ??
+      getModelInfo(selectedModelId);
     const assistantTitle = (() => {
-      const info = getModelInfo(selectedModelId);
-      const shortLabel = typeof info?.shortLabel === 'string' ? info.shortLabel.trim() : '';
+      const shortLabel =
+        typeof selectedModelInfo?.shortLabel === 'string' ? selectedModelInfo.shortLabel.trim() : '';
       if (shortLabel) return shortLabel;
-      const label = typeof info?.label === 'string' ? info.label.trim() : '';
+      const label = typeof selectedModelInfo?.label === 'string' ? selectedModelInfo.label.trim() : '';
       return label || 'Assistant';
     })();
+    const claudeCodeSelected = isClaudeCodeModel(selectedModelInfo);
 
     const hasSelectedAttachmentKeysOverride = Array.isArray(args.selectedAttachmentKeys);
     const selectedAttachmentKeysOverride = hasSelectedAttachmentKeysOverride
@@ -9955,13 +10434,21 @@ export default function App() {
     if (!leafNode) return null;
     if (leafNode.parentId && !isEditableDocumentNode(leafNode)) {
       const parent = preSnapshot.nodes.find((node) => node.id === leafNode.parentId) ?? null;
-      const parentRef =
-        parent?.kind === 'text' && parent.author === 'assistant'
+      const parentRef = claudeCodeSelected
+        ? parent?.kind === 'text' && parent.author === 'assistant'
+          ? normalizeClaudeCodeConversationRef(parent.canonicalMeta)
+          : null
+        : parent?.kind === 'text' && parent.author === 'assistant'
           ? normalizeCodexConversationRef(parent.codexRef)
           : null;
-      if (!parentRef && !isLegacyContinuationEndpoint(meta, parent)) {
+      const validHistoryEndpoint = claudeCodeSelected
+        ? isLegacyContinuationNode(parent)
+        : isLegacyContinuationEndpoint(meta, parent);
+      if (!parentRef && !validHistoryEndpoint) {
         showToast(
-          'To continue or branch, send from a user node attached to a completed or stopped Codex response, or an imported GraphChatV1 response.',
+          claudeCodeSelected
+            ? 'To continue or branch with Claude Code, send from a user node attached to a completed response.'
+            : 'To continue or branch, send from a user node attached to a completed or stopped Codex response, or an imported GraphChatV1 response.',
           'error',
           5200,
         );
@@ -10263,7 +10750,7 @@ export default function App() {
     });
 
     void nodesOverride;
-    startCodexGeneration({
+    startLocalCliGeneration({
       chatId,
       userNodeId,
       assistantNodeId: res.assistantNodeId,

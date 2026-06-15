@@ -89,6 +89,41 @@ interface Window {
       error?: string;
     }>;
     codexOnEvent?: (cb: (payload: any) => void) => () => void;
+    claudeCodeStatus: () => Promise<{ ok: boolean; status?: any; error?: string }>;
+    claudeCodeRestart: () => Promise<{ ok: boolean; status?: any; error?: string }>;
+    claudeCodeGraphTurnStart: (req: {
+      clientTag: string;
+      cwd: string;
+      prompt: string;
+      model: string;
+      effort?: string;
+      permissionMode?: 'read-only' | 'workspace-write' | 'full-access';
+      developerInstructions?: string;
+      source?: { sessionId: string } | null;
+      legacyHistory?: Array<{
+        type: 'message';
+        role: 'user' | 'assistant';
+        content: Array<{
+          type: 'input_text' | 'output_text';
+          text: string;
+        }>;
+      }>;
+    }) => Promise<{
+      ok: boolean;
+      result?: {
+        clientTag: string;
+        operationId: string;
+        sessionId: string;
+        mode: 'new' | 'fork' | 'legacy';
+        forkedFromSessionId?: string | null;
+      };
+      error?: string;
+    }>;
+    claudeCodeTurnInterrupt: (req: { operationId: string }) => Promise<{
+      ok: boolean;
+      error?: string;
+    }>;
+    claudeCodeOnEvent?: (cb: (payload: any) => void) => () => void;
     compileLatex: (req: {
       source?: string;
       projectRoot?: string;

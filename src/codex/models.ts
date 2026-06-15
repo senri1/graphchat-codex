@@ -65,11 +65,12 @@ export function buildCodexComposerModels(
         (model) => model.provider === 'openai' && model.apiModel === apiModel && model.effort === effort,
       );
       const suffix = effortLabel(effort);
-      const model: ModelInfo =
-        existing ??
-        {
+      const model: ModelInfo = existing
+        ? { ...existing, runtime: 'codex' }
+        : {
           id: generatedModelId(apiModel, effort),
           provider: 'openai',
+          runtime: 'codex',
           apiModel,
           label: `Codex - ${displayName}${suffix ? ` (${suffix})` : ''}`,
           shortLabel: `${displayName}${suffix ? ` ${suffix}` : ''}`,

@@ -7,6 +7,8 @@ const os = require('os');
 const { registerStorageIpcHandlers } = require('./storage.cjs');
 const { CodexProcessManager } = require('./codex/process-manager.cjs');
 const { registerCodexIpcHandlers } = require('./codex/ipc-handlers.cjs');
+const { ClaudeCodeProcessManager } = require('./claude-code/process-manager.cjs');
+const { registerClaudeCodeIpcHandlers } = require('./claude-code/ipc-handlers.cjs');
 
 const APP_TITLE = 'GraphChat Codex';
 app.setName(APP_TITLE);
@@ -1043,6 +1045,14 @@ registerCodexIpcHandlers({
   dialog,
   manager: codexProcessManager,
 });
+const claudeCodeProcessManager = new ClaudeCodeProcessManager({
+  resourcesPath: process.resourcesPath,
+});
+registerClaudeCodeIpcHandlers({
+  ipcMain,
+  BrowserWindow,
+  manager: claudeCodeProcessManager,
+});
 
 app.whenReady().then(() => {
   createWindow();
@@ -1057,4 +1067,5 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   codexProcessManager.stop();
+  claudeCodeProcessManager.stop();
 });
