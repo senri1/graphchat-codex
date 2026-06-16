@@ -8,6 +8,7 @@ const {
   CodexProcessManager,
   codexPermissionSettings,
   codexCandidates,
+  codexProcessEnv,
   windowsCodexCandidates,
 } = require('../electron/codex/process-manager.cjs');
 
@@ -88,6 +89,21 @@ test('explicit configuration stays ahead of bundled, desktop app, and PATH candi
     path.join(localAppData, 'OpenAI', 'Codex', 'bin', 'codex.exe'),
   ]);
   assert.equal(candidates[4], path.join(pathDir, 'codex.exe'));
+});
+
+test('Codex app-server PATH includes the selected binary directory on Windows', () => {
+  const binaryDir = 'C:\\Users\\dev\\AppData\\Local\\OpenAI\\Codex\\bin\\current';
+  const baseEnv = {
+    Path: 'C:\\Windows\\System32;C:\\Tools',
+    OTHER: 'kept',
+  };
+
+  const env = codexProcessEnv(path.win32.join(binaryDir, 'codex.exe'), baseEnv, 'win32');
+
+  assert.equal(env.OTHER, 'kept');
+  assert.equal(baseEnv.Path, 'C:\\Windows\\System32;C:\\Tools');
+  assert.equal(env.Path, `${binaryDir};C:\\Windows\\System32;C:\\Tools`);
+  assert.equal(env.PATH, env.Path);
 });
 
 test('a new graph conversation starts a thread before starting its first turn', async (t) => {

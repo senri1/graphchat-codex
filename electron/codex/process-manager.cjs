@@ -115,6 +115,48 @@ function codexCandidates(resourcesPath, options = {}) {
   return Array.from(new Set(out.map((candidate) => cleanString(candidate)).filter(Boolean)));
 }
 
+function pathEnvKey(env, platform = process.platform) {
+  return Object.keys(env).find((name) => String(name).toLowerCase() === 'path') || (platform === 'win32' ? 'Path' : 'PATH');
+}
+
+function prependPathEntries(env, entries, platform = process.platform) {
+  const out = { ...env };
+  const key = pathEnvKey(out, platform);
+  const delimiter = platform === 'win32' ? ';' : ':';
+  const existing = String(out[key] ?? out.PATH ?? out.Path ?? '')
+    .split(delimiter)
+    .map((entry) => cleanString(entry))
+    .filter(Boolean);
+  const seen = new Set(existing.map((entry) => (platform === 'win32' ? entry.toLowerCase() : entry)));
+  const prefix = [];
+
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    const entry = cleanString(raw);
+    if (!entry) continue;
+    const comparable = platform === 'win32' ? entry.toLowerCase() : entry;
+    if (seen.has(comparable)) continue;
+    seen.add(comparable);
+    prefix.push(entry);
+  }
+
+  const merged = [...prefix, ...existing].join(delimiter);
+  out[key] = merged;
+  if (platform === 'win32') {
+    out.Path = merged;
+    out.PATH = merged;
+  } else {
+    out.PATH = merged;
+  }
+  return out;
+}
+
+function codexProcessEnv(binaryPath, baseEnv = process.env, platform = process.platform) {
+  const binary = cleanString(binaryPath);
+  const pathImpl = platform === 'win32' ? path.win32 : path.posix;
+  const binaryDir = binary && (pathImpl.isAbsolute(binary) || /[\\/]/.test(binary)) ? pathImpl.dirname(binary) : '';
+  return prependPathEntries(baseEnv, [binaryDir], platform);
+}
+
 function probeCodexBinary(candidate) {
   if (candidate.includes(path.sep) && !fsSync.existsSync(candidate)) return null;
   const result = spawnSync(candidate, ['--version'], {
@@ -412,7 +454,7 @@ class CodexProcessManager extends EventEmitter {
     const client = new JsonRpcProcessClient({
       command: binary.path,
       args: ['app-server', '--listen', 'stdio://'],
-      env: { ...process.env },
+      env: codexProcessEnv(binary.path),
       cwd: userDataPath,
     });
     this.client = client;
@@ -530,6 +572,7 @@ module.exports = {
   CodexProcessManager,
   codexPermissionSettings,
   codexCandidates,
+  codexProcessEnv,
   findCodexBinary,
   windowsCodexCandidates,
 };
