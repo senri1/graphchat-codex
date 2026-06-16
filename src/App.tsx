@@ -133,6 +133,7 @@ import {
   type ClaudeCodeEffort,
 } from './claudeCode/models';
 import { mergeClaudeCodeResultText } from './claudeCode/streamText';
+import { applyClaudeCodeTimelineEvent } from './claudeCode/timeline';
 import {
   DEFAULT_CODEX_PERMISSION_MODE,
   normalizeCodexPermissionMode,
@@ -4602,6 +4603,18 @@ export default function App() {
     }, delay);
   };
 
+  const updateClaudeCodeTimelineForJob = (job: GenerationJob, event: unknown) => {
+    const previousTimeline = job.codexTimeline ?? [];
+    const nextTimeline = applyClaudeCodeTimelineEvent(previousTimeline, event);
+    if (nextTimeline === previousTimeline) return;
+    job.codexTimeline = nextTimeline;
+    updateStoredTextNode(job.chatId, job.assistantNodeId, { codexTimeline: nextTimeline });
+    if (activeChatIdRef.current === job.chatId) {
+      engineRef.current?.setTextNodeCodexTimeline(job.assistantNodeId, nextTimeline);
+    }
+    schedulePersistSoon();
+  };
+
   const persistCodexJobRef = (job: GenerationJob): CodexConversationRef | null => {
     const threadId = String(job.codexThreadId ?? '').trim();
     const turnId = String(job.codexTurnId ?? '').trim();
@@ -5355,6 +5368,7 @@ export default function App() {
       claudeCodeEffort: modelInfo.claudeCodeEffort,
       claudeCodeForkedFromSessionId: sourceResolution.source?.sessionId ?? null,
       claudeCodeSawTextDelta: false,
+      codexTimeline: [],
     };
     generationJobsByAssistantIdRef.current.set(job.assistantNodeId, job);
     updateStoredTextNode(args.chatId, args.assistantNodeId, {
@@ -5453,6 +5467,7 @@ export default function App() {
       if (event.kind === 'text-delta') {
         const delta = typeof event.delta === 'string' ? event.delta : '';
         if (!delta) return;
+        updateClaudeCodeTimelineForJob(job, event);
         job.claudeCodeSawTextDelta = true;
         job.fullText += delta;
         scheduleJobFlush(job);
@@ -5463,8 +5478,19 @@ export default function App() {
         if (job.claudeCodeSawTextDelta) return;
         const text = typeof event.text === 'string' ? event.text.trim() : '';
         if (!text) return;
+        updateClaudeCodeTimelineForJob(job, event);
         job.fullText = job.fullText.trim() ? `${job.fullText.trim()}\n\n${text}` : text;
         scheduleJobFlush(job);
+        return;
+      }
+
+      if (
+        event.kind === 'tool-use' ||
+        event.kind === 'permission-denied' ||
+        event.kind === 'stderr' ||
+        event.kind === 'protocol-error'
+      ) {
+        updateClaudeCodeTimelineForJob(job, event);
         return;
       }
 
@@ -5474,6 +5500,7 @@ export default function App() {
         job.claudeCodeSessionId = String(event.sessionId ?? '').trim() || job.claudeCodeSessionId;
         const resultText = typeof event.result === 'string' ? event.result : '';
         job.fullText = mergeClaudeCodeResultText(job.fullText, resultText);
+        updateClaudeCodeTimelineForJob(job, { ...event, result: job.fullText });
         const ref = persistClaudeCodeJobRef(job);
         const completed = event.status === 'completed';
         const interrupted = event.status === 'interrupted';
