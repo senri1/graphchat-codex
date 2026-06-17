@@ -5485,10 +5485,13 @@ export default function App() {
       }
 
       if (
+        event.kind === 'assistant-progress' ||
         event.kind === 'tool-use' ||
+        event.kind === 'tool-result' ||
         event.kind === 'permission-denied' ||
         event.kind === 'stderr' ||
-        event.kind === 'protocol-error'
+        event.kind === 'protocol-error' ||
+        event.kind === 'message'
       ) {
         updateClaudeCodeTimelineForJob(job, event);
         return;
@@ -5546,6 +5549,12 @@ export default function App() {
       return;
     }
     startCodexGeneration(args);
+  };
+
+  const startLocalCliGenerationAfterPaint = (args: Parameters<typeof startLocalCliGeneration>[0]) => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => startLocalCliGeneration(args), 0);
+    });
   };
 
   const startOpenAIGeneration = (args: {
@@ -10133,13 +10142,15 @@ export default function App() {
     const snapshot = engine.exportChatState();
     chatStatesRef.current.set(chatId, snapshot);
 
-    startLocalCliGeneration({
+    const generationArgs = {
       chatId,
       userNodeId: res.userNodeId,
       assistantNodeId: res.assistantNodeId,
       modelId: selectedModelId,
       systemInstruction,
-    });
+    };
+    if (claudeCodeSelected) startLocalCliGenerationAfterPaint(generationArgs);
+    else startLocalCliGeneration(generationArgs);
 
     schedulePersistSoon();
     return { chatId, userNodeId: res.userNodeId, assistantNodeId: res.assistantNodeId };
@@ -10795,13 +10806,15 @@ export default function App() {
     });
 
     void nodesOverride;
-    startLocalCliGeneration({
+    const generationArgs = {
       chatId,
       userNodeId,
       assistantNodeId: res.assistantNodeId,
       modelId: selectedModelId,
       systemInstruction,
-    });
+    };
+    if (claudeCodeSelected) startLocalCliGenerationAfterPaint(generationArgs);
+    else startLocalCliGeneration(generationArgs);
 
     schedulePersistSoon();
     return { chatId, assistantNodeId: res.assistantNodeId };

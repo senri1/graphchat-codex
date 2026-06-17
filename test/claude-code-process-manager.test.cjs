@@ -10,6 +10,7 @@ const {
   normalizeClaudeCodeEffort,
   textDeltaFromStreamEvent,
   textFromContent,
+  toolResultsFromUserMessage,
   toolUsesFromAssistantMessage,
 } = require('../electron/claude-code/process-manager.cjs');
 
@@ -77,6 +78,8 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
 
   assert.deepEqual(args, [
     '--print',
+    '--input-format',
+    'text',
     '--output-format',
     'stream-json',
     '--verbose',
@@ -92,8 +95,21 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
     'Use the current project.',
     '--session-id',
     '550e8400-e29b-41d4-a716-446655440000',
-    'Fix the test',
   ]);
+  assert.equal(args.includes('Fix the test'), false);
+});
+
+test('Claude Code prompt text is kept out of process arguments', () => {
+  const prompt = 'x'.repeat(70_000);
+  const args = buildClaudeCodeArgs({
+    prompt,
+    model: 'claude-opus-4-8',
+    permissionMode: 'workspace-write',
+    sessionId: '550e8400-e29b-41d4-a716-446655440000',
+  });
+
+  assert.equal(args.includes(prompt), false);
+  assert.equal(Math.max(...args.map((arg) => arg.length)) < 1_000, true);
 });
 
 test('Claude Code effort validation accepts every supported CLI level', () => {
@@ -115,14 +131,15 @@ test('child graph turns resume and fork the selected parent session', () => {
     permissionMode: 'workspace-write',
     sourceSessionId: 'parent-session',
   });
-  assert.deepEqual(args.slice(-4), [
+  assert.deepEqual(args.slice(-3), [
     '--resume',
     'parent-session',
     '--fork-session',
-    'Now add coverage',
   ]);
-  assert.deepEqual(args.slice(0, 12), [
+  assert.deepEqual(args.slice(0, 14), [
     '--print',
+    '--input-format',
+    'text',
     '--output-format',
     'stream-json',
     '--verbose',
@@ -135,6 +152,7 @@ test('child graph turns resume and fork the selected parent session', () => {
     'max',
     '--resume',
   ]);
+  assert.equal(args.includes('Now add coverage'), false);
 });
 
 test('Claude Code stream helpers extract text deltas, messages, and tools', () => {
@@ -164,6 +182,15 @@ test('Claude Code stream helpers extract text deltas, messages, and tools', () =
       },
     }),
     [{ id: 'tool-1', name: 'Read', input: { file_path: 'a.ts' } }],
+  );
+  assert.deepEqual(
+    toolResultsFromUserMessage({
+      type: 'user',
+      message: {
+        content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: '1\tcontent', is_error: false }],
+      },
+    }),
+    [{ toolUseId: 'tool-1', isError: false, content: '1\tcontent' }],
   );
 });
 

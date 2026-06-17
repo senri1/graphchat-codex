@@ -121,6 +121,17 @@ function textDeltaFromStreamEvent(message) {
     : '';
 }
 
+function sameOrContained(current, next) {
+  const left = cleanString(current);
+  const right = cleanString(next);
+  if (!left) return next;
+  if (!right) return current;
+  if (left === right) return current;
+  if (left.includes(right)) return current;
+  if (right.includes(left)) return next;
+  return `${String(current).trimEnd()}\n\n${String(next).trimStart()}`;
+}
+
 function toolUsesFromAssistantMessage(message) {
   if (message?.type !== 'assistant' || !Array.isArray(message.message?.content)) return [];
   return message.message.content
@@ -129,6 +140,17 @@ function toolUsesFromAssistantMessage(message) {
       id: cleanString(block.id) || randomUUID(),
       name: cleanString(block.name),
       input: block.input ?? {},
+    }));
+}
+
+function toolResultsFromUserMessage(message) {
+  if (message?.type !== 'user' || !Array.isArray(message.message?.content)) return [];
+  return message.message.content
+    .filter((block) => block?.type === 'tool_result' && cleanString(block.tool_use_id || block.toolUseId))
+    .map((block) => ({
+      toolUseId: cleanString(block.tool_use_id || block.toolUseId),
+      isError: Boolean(block.is_error || block.isError),
+      content: typeof block.content === 'string' ? block.content : JSON.stringify(block.content ?? ''),
     }));
 }
 
@@ -166,6 +188,8 @@ function buildClaudeCodeArgs(args) {
 
   const cliArgs = [
     '--print',
+    '--input-format',
+    'text',
     '--output-format',
     'stream-json',
     '--verbose',
@@ -183,7 +207,6 @@ function buildClaudeCodeArgs(args) {
   } else if (sessionId) {
     cliArgs.push('--session-id', sessionId);
   }
-  cliArgs.push(prompt);
   return cliArgs;
 }
 
@@ -278,7 +301,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
       cwd,
       env: { ...process.env },
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
     const operation = {
       child,
@@ -289,6 +312,9 @@ class ClaudeCodeProcessManager extends EventEmitter {
       completed: false,
       stdoutBuffer: '',
       stderrTail: '',
+      stdinError: '',
+      streamMessage: null,
+      toolUseGroupById: new Map(),
     };
     this.activeByOperationId.set(operationId, operation);
 
@@ -311,6 +337,99 @@ class ClaudeCodeProcessManager extends EventEmitter {
         }
       }, 30_000);
 
+      const eventSessionId = (sessionId) => operation.sessionId || sessionId || null;
+      const emitAssistantProgress = (stream, sessionId) => {
+        const text = typeof stream?.text === 'string' ? stream.text.trim() : '';
+        if (!text) return;
+        if (stream.progressFlushed && stream.lastProgressText === text) return;
+        stream.progressFlushed = true;
+        stream.lastProgressText = text;
+        this.emit('event', {
+          kind: 'assistant-progress',
+          clientTag,
+          operationId,
+          sessionId: eventSessionId(sessionId),
+          messageId: stream.id,
+          batchId: stream.batchId,
+          text,
+        });
+      };
+      const emitAssistantFinal = (stream, sessionId) => {
+        const text = typeof stream?.text === 'string' ? stream.text.trim() : '';
+        if (!text) return;
+        this.emit('event', {
+          kind: 'assistant-message',
+          clientTag,
+          operationId,
+          sessionId: eventSessionId(sessionId),
+          text,
+        });
+      };
+      const ensureStreamMessage = (message) => {
+        if (operation.streamMessage) return operation.streamMessage;
+        const id =
+          cleanString(message?.event?.message?.id) ||
+          cleanString(message?.message?.id) ||
+          cleanString(message?.uuid) ||
+          randomUUID();
+        operation.streamMessage = {
+          id,
+          batchId: randomUUID(),
+          text: '',
+          hasToolUse: false,
+          progressFlushed: false,
+          lastProgressText: '',
+        };
+        return operation.streamMessage;
+      };
+
+      const handleStreamEvent = (message, sessionId) => {
+        const streamEvent = message?.event;
+        const type = cleanString(streamEvent?.type);
+        if (type === 'message_start') {
+          operation.streamMessage = {
+            id:
+              cleanString(streamEvent?.message?.id) ||
+              cleanString(message?.uuid) ||
+              randomUUID(),
+            batchId: randomUUID(),
+            text: '',
+            hasToolUse: false,
+            progressFlushed: false,
+            lastProgressText: '',
+          };
+          return;
+        }
+
+        const stream = ensureStreamMessage(message);
+        if (type === 'content_block_start') {
+          const block = streamEvent?.content_block;
+          const blockType = cleanString(block?.type);
+          if (blockType === 'text' && typeof block.text === 'string') {
+            stream.text = sameOrContained(stream.text, block.text);
+          } else if (blockType === 'tool_use') {
+            stream.hasToolUse = true;
+            emitAssistantProgress(stream, sessionId);
+          }
+          return;
+        }
+
+        if (type === 'content_block_delta') {
+          const delta = streamEvent?.delta;
+          if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+            stream.text += delta.text;
+            if (stream.hasToolUse && stream.progressFlushed) emitAssistantProgress(stream, sessionId);
+          }
+          return;
+        }
+
+        if (type === 'message_stop') {
+          if (stream.hasToolUse) emitAssistantProgress(stream, sessionId);
+          else emitAssistantFinal(stream, sessionId);
+          operation.streamMessage = null;
+        }
+      };
+
       const handleMessage = (message) => {
         const sessionId = cleanString(message?.session_id);
         if (sessionId) {
@@ -318,35 +437,60 @@ class ClaudeCodeProcessManager extends EventEmitter {
           finishStart(null, sessionId);
         }
 
-        const delta = textDeltaFromStreamEvent(message);
-        if (delta) {
-          this.emit('event', {
-            kind: 'text-delta',
-            clientTag,
-            operationId,
-            sessionId: operation.sessionId || sessionId || null,
-            delta,
-          });
+        if (message?.type === 'stream_event') {
+          handleStreamEvent(message, sessionId);
         }
 
         if (message?.type === 'assistant') {
           const text = textFromContent(message.message?.content);
+          const tools = toolUsesFromAssistantMessage(message);
           if (text) {
-            this.emit('event', {
-              kind: 'assistant-message',
-              clientTag,
-              operationId,
-              sessionId: operation.sessionId || sessionId || null,
-              text,
-            });
+            if (operation.streamMessage) {
+              operation.streamMessage.text = sameOrContained(operation.streamMessage.text, text);
+              if (operation.streamMessage.hasToolUse) emitAssistantProgress(operation.streamMessage, sessionId);
+            } else if (tools.length > 0) {
+              const stream = ensureStreamMessage(message);
+              stream.text = sameOrContained(stream.text, text);
+              stream.hasToolUse = true;
+              emitAssistantProgress(stream, sessionId);
+            } else {
+              this.emit('event', {
+                kind: 'assistant-message',
+                clientTag,
+                operationId,
+                sessionId: eventSessionId(sessionId),
+                text,
+              });
+            }
           }
-          for (const tool of toolUsesFromAssistantMessage(message)) {
+          if (tools.length > 0) {
+            const stream = ensureStreamMessage(message);
+            stream.hasToolUse = true;
+            emitAssistantProgress(stream, sessionId);
+          }
+          for (const tool of tools) {
+            const stream = ensureStreamMessage(message);
+            operation.toolUseGroupById.set(tool.id, stream.batchId);
             this.emit('event', {
               kind: 'tool-use',
               clientTag,
               operationId,
-              sessionId: operation.sessionId || sessionId || null,
+              sessionId: eventSessionId(sessionId),
+              batchId: stream.batchId,
               tool,
+            });
+          }
+        }
+
+        if (message?.type === 'user') {
+          for (const toolResult of toolResultsFromUserMessage(message)) {
+            this.emit('event', {
+              kind: 'tool-result',
+              clientTag,
+              operationId,
+              sessionId: eventSessionId(sessionId),
+              batchId: operation.toolUseGroupById.get(toolResult.toolUseId) || null,
+              toolResult,
             });
           }
         }
@@ -356,7 +500,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
             kind: 'permission-denied',
             clientTag,
             operationId,
-            sessionId: operation.sessionId || sessionId || null,
+            sessionId: eventSessionId(sessionId),
             toolName: cleanString(message.tool_name),
             message: cleanString(message.message) || 'Claude Code denied a tool request.',
           });
@@ -369,7 +513,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
             kind: 'turn-completed',
             clientTag,
             operationId,
-            sessionId: operation.sessionId || sessionId || null,
+            sessionId: eventSessionId(sessionId),
             status: success ? 'completed' : 'failed',
             result: typeof message.result === 'string' ? message.result : '',
             error: success
@@ -386,7 +530,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
           kind: 'message',
           clientTag,
           operationId,
-          sessionId: operation.sessionId || sessionId || null,
+          sessionId: eventSessionId(sessionId),
           message,
         });
       };
@@ -419,6 +563,10 @@ class ClaudeCodeProcessManager extends EventEmitter {
         this.emit('event', { kind: 'stderr', clientTag, operationId, text });
       });
 
+      child.stdin.on('error', (error) => {
+        operation.stdinError = cleanString(error?.message) || 'Failed to write prompt to Claude Code.';
+      });
+
       child.on('error', (error) => {
         this.lastError = cleanString(error?.message) || 'Failed to start Claude Code.';
         finishStart(new Error(this.lastError));
@@ -439,7 +587,13 @@ class ClaudeCodeProcessManager extends EventEmitter {
       child.on('close', (code) => {
         this.activeByOperationId.delete(operationId);
         if (!settled) {
-          finishStart(new Error(operation.stderrTail.trim() || `Claude Code exited before initialization (${code ?? 'unknown'}).`));
+          finishStart(
+            new Error(
+              operation.stderrTail.trim() ||
+                operation.stdinError ||
+                `Claude Code exited before initialization (${code ?? 'unknown'}).`,
+            ),
+          );
         }
         if (operation.completed) return;
         operation.completed = true;
@@ -454,9 +608,18 @@ class ClaudeCodeProcessManager extends EventEmitter {
             ? 'Canceled'
             : code === 0
               ? null
-              : operation.stderrTail.trim() || `Claude Code exited with code ${code ?? 'unknown'}.`,
+              : operation.stderrTail.trim() ||
+                operation.stdinError ||
+                `Claude Code exited with code ${code ?? 'unknown'}.`,
         });
       });
+
+      try {
+        child.stdin.end(effectivePrompt, 'utf8');
+      } catch (error) {
+        operation.stdinError = cleanString(error?.message) || 'Failed to write prompt to Claude Code.';
+        finishStart(new Error(operation.stdinError));
+      }
     });
 
     const sessionId = await started;
@@ -488,5 +651,6 @@ module.exports = {
   legacyHistoryContext,
   textDeltaFromStreamEvent,
   textFromContent,
+  toolResultsFromUserMessage,
   toolUsesFromAssistantMessage,
 };
