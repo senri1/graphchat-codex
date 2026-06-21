@@ -89,6 +89,8 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
     '--permission-mode',
     'bypassPermissions',
     '--dangerously-skip-permissions',
+    '--thinking-display',
+    'summarized',
     '--effort',
     'xhigh',
     '--append-system-prompt',
@@ -97,6 +99,25 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
     '550e8400-e29b-41d4-a716-446655440000',
   ]);
   assert.equal(args.includes('Fix the test'), false);
+});
+
+test('Opus 4.8 requests thinking summaries without changing other Claude models', () => {
+  const opusArgs = buildClaudeCodeArgs({
+    prompt: 'Explain the result',
+    model: 'claude-opus-4-8',
+    permissionMode: 'read-only',
+  });
+  const sonnetArgs = buildClaudeCodeArgs({
+    prompt: 'Explain the result',
+    model: 'claude-sonnet-4-6',
+    permissionMode: 'read-only',
+  });
+
+  assert.deepEqual(
+    opusArgs.slice(opusArgs.indexOf('--thinking-display'), opusArgs.indexOf('--thinking-display') + 2),
+    ['--thinking-display', 'summarized'],
+  );
+  assert.equal(sonnetArgs.includes('--thinking-display'), false);
 });
 
 test('Claude Code prompt text is kept out of process arguments', () => {
