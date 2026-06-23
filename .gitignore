@@ -3,6 +3,7 @@ dist
 release
 android/
 conversation-context/
+.codex-remote-attachments/
 .DS_Store
 .env*
 !.env.example
