@@ -204,6 +204,11 @@ function normalizeTextNodeStorageRoles(
       node.conversationDraft = undefined;
       continue;
     }
+    if (node.parentId && isRuntimeBranchDocumentNode(state.nodes, node)) {
+      node.isEditNode = undefined;
+      node.documentNode = undefined;
+      continue;
+    }
     if (node.documentNode) {
       node.isEditNode = true;
       node.conversationDraft = undefined;
@@ -331,13 +336,60 @@ function normalizeCodexConversationRef(value: unknown): CodexConversationRef | n
   };
 }
 
+function isClaudeCodeAssistantNode(node: ChatNode | null | undefined): boolean {
+  return Boolean(
+    node?.kind === 'text' &&
+      node.author === 'assistant' &&
+      typeof node.modelId === 'string' &&
+      node.modelId.startsWith('claude-code:'),
+  );
+}
+
+function isRuntimeConversationNode(node: ChatNode | null | undefined): boolean {
+  if (node?.kind !== 'text' || node.author !== 'assistant') return false;
+  return Boolean(
+    normalizeClaudeCodeConversationRef(node.canonicalMeta) ||
+      normalizeCodexConversationRef(node.codexRef) ||
+      isClaudeCodeAssistantNode(node),
+  );
+}
+
+function hasRuntimeConversationAncestor(nodes: ChatNode[], startNodeId: string | null | undefined): boolean {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const visited = new Set<string>();
+  let currentId = typeof startNodeId === 'string' && startNodeId.trim() ? startNodeId.trim() : '';
+
+  while (currentId) {
+    if (visited.has(currentId)) return false;
+    visited.add(currentId);
+
+    const node = nodeById.get(currentId) ?? null;
+    if (!node) return false;
+    if (isRuntimeConversationNode(node)) return true;
+    currentId = typeof node.parentId === 'string' && node.parentId.trim() ? node.parentId.trim() : '';
+  }
+
+  return false;
+}
+
+function isRuntimeBranchDocumentNode(nodes: ChatNode[], node: ChatNode | null | undefined): boolean {
+  return Boolean(
+    isEditableDocumentNode(node) &&
+      typeof node.parentId === 'string' &&
+      node.parentId.trim() &&
+      hasRuntimeConversationAncestor(nodes, node.parentId),
+  );
+}
+
 function resolveCodexSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
   source: CodexConversationRef | null;
   parentNodeId: string | null;
 } {
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
-  if (isEditableDocumentNode(userNode)) return { source: null, parentNodeId: null };
   const parentNodeId = typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
+  if (isEditableDocumentNode(userNode) && !hasRuntimeConversationAncestor(nodes, parentNodeId)) {
+    return { source: null, parentNodeId: null };
+  }
   if (!parentNodeId) return { source: null, parentNodeId: null };
   const parent = nodes.find((node) => node.id === parentNodeId) ?? null;
   if (!parent || parent.kind !== 'text' || parent.author !== 'assistant') {
@@ -364,9 +416,11 @@ function resolveClaudeCodeSourceForUserNode(nodes: ChatNode[], userNodeId: strin
   parentNodeId: string | null;
 } {
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
-  if (isEditableDocumentNode(userNode)) return { source: null, parentNodeId: null };
   const parentNodeId =
     typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
+  if (isEditableDocumentNode(userNode) && !hasRuntimeConversationAncestor(nodes, parentNodeId)) {
+    return { source: null, parentNodeId: null };
+  }
   if (!parentNodeId) return { source: null, parentNodeId: null };
   const parent = nodes.find((node) => node.id === parentNodeId) ?? null;
   if (!parent || parent.kind !== 'text' || parent.author !== 'assistant') {
@@ -4521,6 +4575,7 @@ export default function App() {
         extra: { parent_id: args.parentId },
       };
     }
+    const parentInRuntimeBranch = parent ? isRuntimeConversationNode(parent) || hasRuntimeConversationAncestor(state.nodes, parent.id) : false;
 
     const width = 460;
     const height = 240;
@@ -4550,8 +4605,7 @@ export default function App() {
       latexProjectRoot: null,
       latexMainFile: null,
       latexActiveFile: null,
-      isEditNode: true,
-      documentNode: true,
+      ...(parentInRuntimeBranch ? {} : { isEditNode: true, documentNode: true }),
       llmError: null,
     };
 
@@ -5285,6 +5339,20 @@ export default function App() {
     let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
       const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
+      if (isClaudeCodeAssistantNode(parentNode)) {
+        const message =
+          'Cannot continue this Claude Code branch because the parent response is missing its Claude Code session id.';
+        updateStoredTextNode(args.chatId, args.assistantNodeId, {
+          content: message,
+          isGenerating: false,
+          llmError: message,
+        });
+        if (activeChatIdRef.current === args.chatId) {
+          engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
+        }
+        showToast(message, 'error', 6200);
+        return;
+      }
       if (!isLegacyContinuationNode(parentNode) && !isEditableDocumentNode(parentNode)) {
         const message = 'Reply from a completed response or editable document to start a Claude Code branch.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, {
@@ -10042,7 +10110,8 @@ export default function App() {
       }
     }
     if (desiredParentId) {
-      const parentNode = engine.exportChatState().nodes.find((node) => node.id === desiredParentId) ?? null;
+      const snapshot = engine.exportChatState();
+      const parentNode = snapshot.nodes.find((node) => node.id === desiredParentId) ?? null;
       const parentRef = claudeCodeSelected
         ? parentNode?.kind === 'text' && parentNode.author === 'assistant'
           ? normalizeClaudeCodeConversationRef(parentNode.canonicalMeta)
@@ -10053,6 +10122,14 @@ export default function App() {
       const validHistoryEndpoint = claudeCodeSelected
         ? isLegacyContinuationNode(parentNode)
         : isLegacyContinuationEndpoint(meta, parentNode);
+      if (claudeCodeSelected && isClaudeCodeAssistantNode(parentNode) && !parentRef) {
+        showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
+        return null;
+      }
+      if (isRuntimeBranchDocumentNode(snapshot.nodes, parentNode)) {
+        showToast('This note belongs to a runtime branch and is read-only conversation context.', 'error', 5200);
+        return null;
+      }
       if (!parentRef && !validHistoryEndpoint && !isEditableDocumentNode(parentNode)) {
         showToast(
           claudeCodeSelected
@@ -10488,7 +10565,15 @@ export default function App() {
     const preSnapshot = engine.exportChatState();
     const leafNode = preSnapshot.nodes.find((n) => n.id === userNodeId) ?? null;
     if (!leafNode) return null;
-    if (leafNode.parentId && !isEditableDocumentNode(leafNode)) {
+    const leafRuntimeDocument = isRuntimeBranchDocumentNode(preSnapshot.nodes, leafNode);
+    if (leafRuntimeDocument) {
+      try {
+        engine.makeTextNodeReadOnly(userNodeId);
+      } catch {
+        // ignore
+      }
+    }
+    if (leafNode.parentId && (!isEditableDocumentNode(leafNode) || leafRuntimeDocument)) {
       const parent = preSnapshot.nodes.find((node) => node.id === leafNode.parentId) ?? null;
       const parentRef = claudeCodeSelected
         ? parent?.kind === 'text' && parent.author === 'assistant'
@@ -10500,6 +10585,10 @@ export default function App() {
       const validHistoryEndpoint = claudeCodeSelected
         ? isLegacyContinuationNode(parent)
         : isLegacyContinuationEndpoint(meta, parent);
+      if (claudeCodeSelected && isClaudeCodeAssistantNode(parent) && !parentRef) {
+        showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
+        return null;
+      }
       if (!parentRef && !validHistoryEndpoint) {
         showToast(
           claudeCodeSelected

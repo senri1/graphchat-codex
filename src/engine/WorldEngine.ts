@@ -5115,6 +5115,24 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.requestPersist();
   }
 
+  makeTextNodeReadOnly(nodeId: string): void {
+    const id = typeof nodeId === 'string' ? nodeId.trim() : '';
+    if (!id) return;
+    const node = this.nodes.find((item): item is TextNode => item.kind === 'text' && item.id === id) ?? null;
+    if (!node) return;
+    if (!node.isEditNode && !node.documentNode && !node.conversationDraft) return;
+    node.isEditNode = undefined;
+    node.documentNode = undefined;
+    node.conversationDraft = undefined;
+    if (this.editingNodeId === id) {
+      this.editingNodeId = null;
+      this.editingOriginalContent = null;
+    }
+    this.requestRender();
+    this.emitUiState();
+    this.requestPersist();
+  }
+
   setTextNodeContent(nodeId: string, next: string, opts?: { streaming?: boolean }): void {
     const id = nodeId;
     if (!id) return;
