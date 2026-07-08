@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChatNode } from '../model/chat';
-import { buildLegacyHistory, isLegacyContinuationNode } from './legacyHistory.ts';
+import { buildLegacyHistory, hasUserPrefaceContext, isLegacyContinuationNode } from './legacyHistory.ts';
 
 function textNode(args: {
   id: string;
@@ -64,6 +64,38 @@ test('includes the user preface that formed part of the original prompt', () => 
       'Main question',
     ].join('\n\n'),
   );
+});
+
+test('detects contextual replies with one or multiple selected contexts', () => {
+  const oneContext = textNode({
+    id: 'u1',
+    author: 'user',
+    content: 'Explain this',
+    userPreface: { contexts: ['Selected passage'] },
+  });
+  const multipleContexts = textNode({
+    id: 'u2',
+    author: 'user',
+    content: 'Compare these',
+    userPreface: { contexts: ['First passage', '  ', 'Second passage'] },
+  });
+  const replyContext = textNode({
+    id: 'u3',
+    author: 'user',
+    content: 'Why?',
+    userPreface: { replyTo: 'Quoted passage' },
+  });
+  const emptyContext = textNode({
+    id: 'u4',
+    author: 'user',
+    content: 'Standalone note',
+    userPreface: { contexts: ['  '] },
+  });
+
+  assert.equal(hasUserPrefaceContext(oneContext), true);
+  assert.equal(hasUserPrefaceContext(multipleContexts), true);
+  assert.equal(hasUserPrefaceContext(replyContext), true);
+  assert.equal(hasUserPrefaceContext(emptyContext), false);
 });
 
 test('skips non-text and empty nodes', () => {

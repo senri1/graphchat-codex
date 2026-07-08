@@ -118,6 +118,7 @@ import {
 } from './codex/threadImport';
 import {
   buildLegacyHistory,
+  hasUserPrefaceContext,
   isLegacyContinuationNode,
   type CodexInjectedMessage,
 } from './codex/legacyHistory';
@@ -387,7 +388,11 @@ function resolveCodexSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
 } {
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
   const parentNodeId = typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
-  if (isEditableDocumentNode(userNode) && !hasRuntimeConversationAncestor(nodes, parentNodeId)) {
+  if (
+    isEditableDocumentNode(userNode) &&
+    !hasUserPrefaceContext(userNode) &&
+    !hasRuntimeConversationAncestor(nodes, parentNodeId)
+  ) {
     return { source: null, parentNodeId: null };
   }
   if (!parentNodeId) return { source: null, parentNodeId: null };
@@ -418,7 +423,11 @@ function resolveClaudeCodeSourceForUserNode(nodes: ChatNode[], userNodeId: strin
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
   const parentNodeId =
     typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
-  if (isEditableDocumentNode(userNode) && !hasRuntimeConversationAncestor(nodes, parentNodeId)) {
+  if (
+    isEditableDocumentNode(userNode) &&
+    !hasUserPrefaceContext(userNode) &&
+    !hasRuntimeConversationAncestor(nodes, parentNodeId)
+  ) {
     return { source: null, parentNodeId: null };
   }
   if (!parentNodeId) return { source: null, parentNodeId: null };

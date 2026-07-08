@@ -13,6 +13,12 @@ function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+export function hasUserPrefaceContext(node: ChatNode | null | undefined): boolean {
+  if (!node || (node.kind !== 'text' && node.kind !== 'ink')) return false;
+  if (clean(node.userPreface?.replyTo)) return true;
+  return Array.isArray(node.userPreface?.contexts) && node.userPreface.contexts.some((text) => clean(text));
+}
+
 function visibleTextForNode(node: Extract<ChatNode, { kind: 'text' }>): string {
   if (node.author !== 'user') return clean(node.content);
 

@@ -215,6 +215,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
   constructor(options) {
     super();
     this.resourcesPath = options.resourcesPath;
+    this.spawn = typeof options.spawn === 'function' ? options.spawn : spawn;
     this.binary = null;
     this.lastError = null;
     this.stderrTail = '';
@@ -298,7 +299,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
       sessionId: requestedSessionId,
     });
 
-    const child = spawn(this.binary.path, cliArgs, {
+    const child = this.spawn(this.binary.path, cliArgs, {
       cwd,
       env: { ...process.env },
       windowsHide: true,
@@ -366,6 +367,18 @@ class ClaudeCodeProcessManager extends EventEmitter {
           text,
         });
       };
+      const emitTextDelta = (stream, sessionId, delta) => {
+        if (typeof delta !== 'string' || !delta) return;
+        this.emit('event', {
+          kind: 'text-delta',
+          clientTag,
+          operationId,
+          sessionId: eventSessionId(sessionId),
+          messageId: stream.id,
+          batchId: stream.batchId,
+          delta,
+        });
+      };
       const ensureStreamMessage = (message) => {
         if (operation.streamMessage) return operation.streamMessage;
         const id =
@@ -408,6 +421,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
           const blockType = cleanString(block?.type);
           if (blockType === 'text' && typeof block.text === 'string') {
             stream.text = sameOrContained(stream.text, block.text);
+            if (!stream.hasToolUse) emitTextDelta(stream, sessionId, block.text);
           } else if (blockType === 'tool_use') {
             stream.hasToolUse = true;
             emitAssistantProgress(stream, sessionId);
@@ -419,7 +433,11 @@ class ClaudeCodeProcessManager extends EventEmitter {
           const delta = streamEvent?.delta;
           if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
             stream.text += delta.text;
-            if (stream.hasToolUse && stream.progressFlushed) emitAssistantProgress(stream, sessionId);
+            if (stream.hasToolUse) {
+              if (stream.progressFlushed) emitAssistantProgress(stream, sessionId);
+            } else {
+              emitTextDelta(stream, sessionId, delta.text);
+            }
           }
           return;
         }

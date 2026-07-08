@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
 const path = require('node:path');
 const test = require('node:test');
 
 const {
+  ClaudeCodeProcessManager,
   buildClaudeCodeArgs,
   claudeCodeCandidates,
   claudeCodePermissionSettings,
@@ -13,6 +15,49 @@ const {
   toolResultsFromUserMessage,
   toolUsesFromAssistantMessage,
 } = require('../electron/claude-code/process-manager.cjs');
+
+function fakeSpawnForMessages(messages) {
+  const calls = [];
+  const fakeSpawn = (command, args, options) => {
+    calls.push({ command, args, options });
+    const child = new EventEmitter();
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.stdin = new EventEmitter();
+    child.stdin.end = () => {
+      setImmediate(() => {
+        for (const message of messages) {
+          child.stdout.emit('data', Buffer.from(`${JSON.stringify(message)}\n`, 'utf8'));
+        }
+        setImmediate(() => child.emit('close', 0));
+      });
+    };
+    child.kill = () => {
+      child.emit('close', null);
+    };
+    return child;
+  };
+  fakeSpawn.calls = calls;
+  return fakeSpawn;
+}
+
+async function runFakeClaudeCodeTurn(messages) {
+  const fakeSpawn = fakeSpawnForMessages(messages);
+  const manager = new ClaudeCodeProcessManager({ resourcesPath: null, spawn: fakeSpawn });
+  manager.binary = { path: 'claude-test', version: 'test' };
+  const events = [];
+  manager.on('event', (event) => events.push(event));
+  await manager.startGraphTurn({
+    clientTag: 'assistant-node',
+    cwd: path.join(__dirname, '..'),
+    prompt: 'Test prompt',
+    model: 'claude-fable-5',
+    effort: 'high',
+    permissionMode: 'read-only',
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  return { events, fakeSpawn };
+}
 
 test('Claude Code discovery includes the native per-user install before PATH candidates', () => {
   const candidates = claudeCodeCandidates('C:\\GraphChat\\resources', {
@@ -142,6 +187,112 @@ test('Claude Code effort validation accepts every supported CLI level', () => {
     () => normalizeClaudeCodeEffort('minimal'),
     /Unsupported Claude Code effort level: minimal/,
   );
+});
+
+test('Claude Code graph turns forward text deltas before message stop', async () => {
+  const { events } = await runFakeClaudeCodeTurn([
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'message_start', message: { id: 'message-1' } },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ' world' } },
+    },
+    {
+      type: 'assistant',
+      session_id: 'session-1',
+      message: { content: [{ type: 'text', text: 'Hello world' }] },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'content_block_stop', index: 0 },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'message_stop' },
+    },
+    {
+      type: 'result',
+      session_id: 'session-1',
+      subtype: 'success',
+      is_error: false,
+      result: 'Hello world',
+    },
+  ]);
+
+  assert.deepEqual(
+    events.filter((event) => event.kind === 'text-delta').map((event) => event.delta),
+    ['Hello', ' world'],
+  );
+  const firstTextDelta = events.findIndex((event) => event.kind === 'text-delta');
+  const assistantMessage = events.findIndex((event) => event.kind === 'assistant-message');
+  assert.notEqual(firstTextDelta, -1);
+  assert.notEqual(assistantMessage, -1);
+  assert.equal(firstTextDelta < assistantMessage, true);
+});
+
+test('Claude Code graph turns keep known tool-use stream text out of final deltas', async () => {
+  const { events } = await runFakeClaudeCodeTurn([
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'message_start', message: { id: 'message-1' } },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tool-1', name: 'Read' } },
+    },
+    {
+      type: 'assistant',
+      session_id: 'session-1',
+      message: {
+        content: [
+          { type: 'text', text: 'Inspecting note.txt first.' },
+          { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: 'note.txt' } },
+        ],
+      },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'content_block_delta', index: 1, delta: { type: 'text_delta', text: 'Still inspecting.' } },
+    },
+    {
+      type: 'stream_event',
+      session_id: 'session-1',
+      event: { type: 'message_stop' },
+    },
+    {
+      type: 'result',
+      session_id: 'session-1',
+      subtype: 'success',
+      is_error: false,
+      result: '',
+    },
+  ]);
+
+  assert.deepEqual(events.filter((event) => event.kind === 'text-delta'), []);
+  assert.equal(
+    events.some((event) => event.kind === 'assistant-progress' && event.text.includes('Inspecting note.txt')),
+    true,
+  );
+  assert.equal(events.some((event) => event.kind === 'tool-use'), true);
 });
 
 test('child graph turns resume and fork the selected parent session', () => {
