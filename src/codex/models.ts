@@ -1,4 +1,4 @@
-import type { ModelInfo } from '../llm/registry';
+import type { ModelInfo, ReasoningEffort } from '../llm/registry';
 
 export type CodexRuntimeModel = {
   id?: string;
@@ -14,22 +14,13 @@ export type CodexRuntimeModel = {
   inputModalities?: string[];
 };
 
-const SUPPORTED_EFFORTS = new Set<ModelInfo['effort']>([
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-]);
-
 function cleanString(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function normalizeEffort(value: unknown): ModelInfo['effort'] | undefined {
-  const effort = cleanString(value) as ModelInfo['effort'];
-  return SUPPORTED_EFFORTS.has(effort) ? effort : undefined;
+export function normalizeCodexReasoningEffort(value: unknown): ReasoningEffort | undefined {
+  const effort = cleanString(value);
+  return effort ? (effort as ReasoningEffort) : undefined;
 }
 
 function effortLabel(effort: ModelInfo['effort'] | undefined): string {
@@ -54,11 +45,11 @@ export function buildCodexComposerModels(
     const displayName = cleanString(runtimeModel.displayName) || apiModel;
     const efforts = Array.isArray(runtimeModel.supportedReasoningEfforts)
       ? runtimeModel.supportedReasoningEfforts
-          .map((item) => normalizeEffort(item?.reasoningEffort))
+          .map((item) => normalizeCodexReasoningEffort(item?.reasoningEffort))
           .filter((effort): effort is NonNullable<ModelInfo['effort']> => Boolean(effort))
       : [];
     const normalizedEfforts: Array<ModelInfo['effort'] | undefined> = efforts.length ? efforts : [undefined];
-    const defaultEffort = normalizeEffort(runtimeModel.defaultReasoningEffort) ?? normalizedEfforts[0];
+    const defaultEffort = normalizeCodexReasoningEffort(runtimeModel.defaultReasoningEffort) ?? normalizedEfforts[0];
 
     for (const effort of normalizedEfforts) {
       const existing = registryModels.find(
@@ -76,7 +67,7 @@ export function buildCodexComposerModels(
           shortLabel: `${displayName}${suffix ? ` ${suffix}` : ''}`,
           supportsImageInput: Array.isArray(runtimeModel.inputModalities)
             ? runtimeModel.inputModalities.includes('image')
-            : false,
+            : true,
           parameters: { webSearch: false, streaming: true, background: false },
           defaults: { webSearch: false, streaming: true, background: false },
           ...(effort ? { effort } : {}),

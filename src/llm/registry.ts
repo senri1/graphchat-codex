@@ -2,6 +2,19 @@ export type ProviderId = 'openai' | 'gemini' | 'anthropic' | 'xai';
 
 export type TextVerbosity = 'low' | 'medium' | 'high';
 
+// Codex app-server advertises reasoning efforts as non-empty strings so new
+// model-specific levels can be added without requiring a client release.
+export type ReasoningEffort =
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra'
+  | (string & {});
+
 export interface ModelInfo {
   id: string; // UI/model id used in the app (e.g. 'gpt-4o-mini')
   provider: ProviderId;
@@ -21,7 +34,7 @@ export interface ModelInfo {
     background: boolean;
     verbosity?: TextVerbosity;
   };
-  effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  effort?: ReasoningEffort;
   claudeCodeEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   reasoningSummary?: boolean;
   thinkingLevel?: 'minimal' | 'low' | 'medium' | 'high';

@@ -121,7 +121,7 @@ export type CodexConversationRef = {
   turnId: string;
   cwd: string;
   model?: string;
-  effort?: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  effort?: string;
   forkedFromThreadId?: string;
   forkedFromTurnId?: string;
 };

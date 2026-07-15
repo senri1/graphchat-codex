@@ -9,6 +9,7 @@ const {
   codexPermissionSettings,
   codexCandidates,
   codexProcessEnv,
+  sameCodexBinary,
   windowsCodexCandidates,
 } = require('../electron/codex/process-manager.cjs');
 
@@ -104,6 +105,71 @@ test('Codex app-server PATH includes the selected binary directory on Windows', 
   assert.equal(baseEnv.Path, 'C:\\Windows\\System32;C:\\Tools');
   assert.equal(env.Path, `${binaryDir};C:\\Windows\\System32;C:\\Tools`);
   assert.equal(env.PATH, env.Path);
+});
+
+test('Codex binary identity includes both executable path and version', () => {
+  assert.equal(
+    sameCodexBinary(
+      { path: 'C:\\Users\\dev\\Codex\\codex.exe', version: 'codex-cli 1.0.0' },
+      { path: 'c:\\users\\dev\\codex\\CODEX.EXE', version: 'codex-cli 1.0.0' },
+      'win32',
+    ),
+    true,
+  );
+  assert.equal(
+    sameCodexBinary(
+      { path: '/opt/codex/codex', version: 'codex-cli 1.0.0' },
+      { path: '/opt/codex/codex', version: 'codex-cli 1.1.0' },
+      'linux',
+    ),
+    false,
+  );
+});
+
+test('model refresh restarts an idle stale Codex app-server', async () => {
+  const current = { path: 'C:\\Codex\\old\\codex.exe', version: 'codex-cli 1.0.0' };
+  const latest = { path: 'C:\\Codex\\new\\codex.exe', version: 'codex-cli 1.1.0' };
+  const manager = new CodexProcessManager({
+    app: { getPath: () => os.tmpdir() },
+    resourcesPath: null,
+    findBinary: () => latest,
+  });
+  manager.state = 'ready';
+  manager.client = {};
+  manager.binary = current;
+  let restartCount = 0;
+  manager.restart = async () => {
+    restartCount += 1;
+    manager.binary = latest;
+    return manager.status();
+  };
+
+  const status = await manager.ensureLatestBinary();
+
+  assert.equal(restartCount, 1);
+  assert.equal(status.binaryPath, latest.path);
+  assert.equal(status.version, latest.version);
+});
+
+test('model refresh does not restart Codex during an active graph turn', async () => {
+  const current = { path: 'C:\\Codex\\old\\codex.exe', version: 'codex-cli 1.0.0' };
+  const latest = { path: 'C:\\Codex\\new\\codex.exe', version: 'codex-cli 1.1.0' };
+  const manager = new CodexProcessManager({
+    app: { getPath: () => os.tmpdir() },
+    resourcesPath: null,
+    findBinary: () => latest,
+  });
+  manager.state = 'ready';
+  manager.client = {};
+  manager.binary = current;
+  manager.graphClientTagByTurnId.set('turn-active', 'node-active');
+  manager.restart = async () => {
+    throw new Error('should not restart');
+  };
+
+  const status = await manager.ensureLatestBinary();
+
+  assert.equal(status.binaryPath, current.path);
 });
 
 test('a new graph conversation starts a thread before starting its first turn', async (t) => {

@@ -22,6 +22,7 @@ import type { PDFPageProxy, PageViewport } from 'pdfjs-dist';
 import { loadPdfDocument } from './pdf/pdfjs';
 import { getAttachment as getStoredAttachment } from '../storage/attachments';
 import { normalizeCodexEvents } from '../codex/events';
+import { normalizeCodexReasoningEffort } from '../codex/models';
 import { normalizeCodexTimeline } from '../codex/timeline';
 import type {
   CanonicalAssistantMessage,
@@ -1512,15 +1513,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           const cwd = typeof raw.cwd === 'string' ? raw.cwd.trim() : '';
           const model = typeof raw.model === 'string' ? raw.model.trim() : '';
           if (!threadId || !turnId || !cwd) return undefined;
-          const effort =
-            raw.effort === 'none' ||
-            raw.effort === 'minimal' ||
-            raw.effort === 'low' ||
-            raw.effort === 'medium' ||
-            raw.effort === 'high' ||
-            raw.effort === 'xhigh'
-              ? raw.effort
-              : undefined;
+          const effort = normalizeCodexReasoningEffort(raw.effort);
           const forkedFromThreadId =
             typeof raw.forkedFromThreadId === 'string' && raw.forkedFromThreadId.trim()
               ? raw.forkedFromThreadId.trim()

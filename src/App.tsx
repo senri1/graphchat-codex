@@ -124,6 +124,7 @@ import {
 } from './codex/legacyHistory';
 import {
   buildCodexComposerModels,
+  normalizeCodexReasoningEffort,
   resolveCodexComposerModelId,
   type CodexRuntimeModel,
 } from './codex/models';
@@ -309,15 +310,7 @@ function normalizeCodexConversationRef(value: unknown): CodexConversationRef | n
   const cwd = typeof raw.cwd === 'string' ? raw.cwd.trim() : '';
   const model = typeof raw.model === 'string' ? raw.model.trim() : '';
   if (!threadId || !turnId || !cwd) return null;
-  const effort =
-    raw.effort === 'none' ||
-    raw.effort === 'minimal' ||
-    raw.effort === 'low' ||
-    raw.effort === 'medium' ||
-    raw.effort === 'high' ||
-    raw.effort === 'xhigh'
-      ? raw.effort
-      : undefined;
+  const effort = normalizeCodexReasoningEffort(raw.effort);
   const forkedFromThreadId =
     typeof raw.forkedFromThreadId === 'string' && raw.forkedFromThreadId.trim()
       ? raw.forkedFromThreadId.trim()
@@ -3381,6 +3374,7 @@ export default function App() {
   const composerModelOptionsRef = useRef<ModelInfo[]>([]);
   const [defaultCodexComposerModelId, setDefaultCodexComposerModelId] = useState<string | null>(null);
   const defaultCodexComposerModelIdRef = useRef<string | null>(null);
+  const [codexModelRefreshSeq, setCodexModelRefreshSeq] = useState(0);
 
   const toastTimerRef = useRef<number | null>(null);
   const toastIdRef = useRef(0);
@@ -4180,17 +4174,30 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const unsubscribe = window.gcElectron?.codexOnEvent?.((event: any) => {
+      if (event?.kind === 'status' && event?.status?.ready) {
+        setCodexModelRefreshSeq((value) => value + 1);
+      }
+    });
+    return typeof unsubscribe === 'function' ? unsubscribe : undefined;
+  }, []);
+
+  useEffect(() => {
     const api = window.gcElectron;
     if (!api?.codexModelList) return;
     let cancelled = false;
+    let loading = false;
 
-    void Promise.all([
-      api.codexModelList(),
-      typeof api.claudeCodeStatus === 'function'
-        ? api.claudeCodeStatus().catch(() => null)
-        : Promise.resolve(null),
-    ])
-      .then(([response, claudeCodeResponse]) => {
+    const loadModels = async (silent = false) => {
+      if (loading) return;
+      loading = true;
+      try {
+        const [response, claudeCodeResponse] = await Promise.all([
+          api.codexModelList(),
+          typeof api.claudeCodeStatus === 'function'
+            ? api.claudeCodeStatus().catch(() => null)
+            : Promise.resolve(null),
+        ]);
         if (cancelled) return;
         if (!response?.ok) throw new Error(response?.error || 'Failed to list Codex models.');
         const runtimeModels = Array.isArray(response.result?.data)
@@ -4208,16 +4215,26 @@ export default function App() {
         defaultCodexComposerModelIdRef.current = built.defaultModelId;
         setComposerModelOptions(models);
         setDefaultCodexComposerModelId(built.defaultModelId);
-      })
-      .catch((error: any) => {
+      } catch (error: any) {
         if (cancelled) return;
-        showToast(error?.message || 'Failed to load Codex models.', 'error', 6200);
-      });
+        if (!silent) showToast(error?.message || 'Failed to load Codex models.', 'error', 6200);
+      } finally {
+        loading = false;
+      }
+    };
+
+    const onFocus = () => {
+      void loadModels(true);
+    };
+
+    void loadModels();
+    window.addEventListener('focus', onFocus);
 
     return () => {
       cancelled = true;
+      window.removeEventListener('focus', onFocus);
     };
-  }, [allModels]);
+  }, [allModels, codexModelRefreshSeq]);
 
   useEffect(() => {
     if (!composerModelOptions.length || !defaultCodexComposerModelId) return;

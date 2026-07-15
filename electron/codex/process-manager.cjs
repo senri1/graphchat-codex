@@ -177,11 +177,24 @@ function findCodexBinary(resourcesPath) {
   return null;
 }
 
+function sameCodexBinary(left, right, platform = process.platform) {
+  const leftPath = cleanString(left?.path);
+  const rightPath = cleanString(right?.path);
+  if (!leftPath || !rightPath) return false;
+  const normalizePath = (value) => {
+    const resolved = path.resolve(value);
+    return platform === 'win32' ? resolved.toLowerCase() : resolved;
+  };
+  return normalizePath(leftPath) === normalizePath(rightPath)
+    && cleanString(left?.version) === cleanString(right?.version);
+}
+
 class CodexProcessManager extends EventEmitter {
   constructor(options) {
     super();
     this.app = options.app;
     this.resourcesPath = options.resourcesPath;
+    this.findBinary = typeof options.findBinary === 'function' ? options.findBinary : findCodexBinary;
     this.client = null;
     this.startPromise = null;
     this.binary = null;
@@ -220,6 +233,15 @@ class CodexProcessManager extends EventEmitter {
   async restart() {
     this.stop();
     return await this.ensureStarted();
+  }
+
+  async ensureLatestBinary() {
+    if (this.state !== 'ready' || !this.client) return await this.ensureStarted();
+    if (this.pendingGraphStarts > 0 || this.graphClientTagByTurnId.size > 0) return this.status();
+
+    const discovered = this.findBinary(this.resourcesPath);
+    if (!discovered || sameCodexBinary(this.binary, discovered)) return this.status();
+    return await this.restart();
   }
 
   stop() {
@@ -439,7 +461,7 @@ class CodexProcessManager extends EventEmitter {
     this.stderrTail = '';
     this.#emitStatus();
 
-    const binary = findCodexBinary(this.resourcesPath);
+    const binary = this.findBinary(this.resourcesPath);
     if (!binary) {
       const error = 'No working Codex executable was found. Install Codex or set GRAPHCHAT_CODEX_BINARY.';
       this.state = 'error';
@@ -574,5 +596,6 @@ module.exports = {
   codexCandidates,
   codexProcessEnv,
   findCodexBinary,
+  sameCodexBinary,
   windowsCodexCandidates,
 };

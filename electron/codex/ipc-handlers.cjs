@@ -66,6 +66,7 @@ function registerCodexIpcHandlers(options) {
   });
   ipcMain.handle('codex:model-list', async () => {
     try {
+      await manager.ensureLatestBinary();
       return {
         ok: true,
         result: await manager.request('model/list', {
