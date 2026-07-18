@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ChatNode } from '../model/chat';
-import { buildLegacyHistory, hasUserPrefaceContext, isLegacyContinuationNode } from './legacyHistory.ts';
+import {
+  buildLegacyHistory,
+  hasUserPrefaceContext,
+  isClaudeCodeHistoryInjectionEndpoint,
+  isLegacyContinuationNode,
+} from './legacyHistory.ts';
 
 function textNode(args: {
   id: string;
   parentId?: string | null;
   author: 'user' | 'assistant';
   content: string;
+  modelId?: string;
   userPreface?: { replyTo?: string; contexts?: string[] };
 }): Extract<ChatNode, { kind: 'text' }> {
   return {
@@ -18,6 +24,7 @@ function textNode(args: {
     rect: { x: 0, y: 0, w: 100, h: 100 },
     author: args.author,
     content: args.content,
+    ...(args.modelId ? { modelId: args.modelId } : {}),
     ...(args.userPreface ? { userPreface: args.userPreface } : {}),
   };
 }
@@ -160,6 +167,52 @@ test('allows a non-empty stopped assistant response as a legacy continuation poi
       content: [{ type: 'output_text', text: 'I converted the first section.' }],
     },
   ]);
+});
+
+test('allows completed or stopped Claude Code responses to seed another runtime history', () => {
+  const completed = textNode({
+    id: 'a1',
+    author: 'assistant',
+    content: 'Completed Claude response',
+    modelId: 'claude-code:claude-fable-5:xhigh',
+  });
+  const stopped = textNode({
+    id: 'a2',
+    author: 'assistant',
+    content: 'Partial Claude response',
+    modelId: 'claude-code:claude-fable-5:max',
+  });
+  stopped.llmError = 'Canceled';
+
+  assert.equal(isClaudeCodeHistoryInjectionEndpoint(completed), true);
+  assert.equal(isClaudeCodeHistoryInjectionEndpoint(stopped), true);
+});
+
+test('does not treat active, failed, or non-Claude responses as Claude history endpoints', () => {
+  const active = textNode({
+    id: 'a1',
+    author: 'assistant',
+    content: 'Still working',
+    modelId: 'claude-code:claude-fable-5:xhigh',
+  });
+  active.isGenerating = true;
+  const failed = textNode({
+    id: 'a2',
+    author: 'assistant',
+    content: 'Claude failed',
+    modelId: 'claude-code:claude-fable-5:xhigh',
+  });
+  failed.llmError = 'process exited with code 1';
+  const codex = textNode({
+    id: 'a3',
+    author: 'assistant',
+    content: 'Codex response',
+    modelId: 'codex:gpt-5.4:xhigh',
+  });
+
+  assert.equal(isClaudeCodeHistoryInjectionEndpoint(active), false);
+  assert.equal(isClaudeCodeHistoryInjectionEndpoint(failed), false);
+  assert.equal(isClaudeCodeHistoryInjectionEndpoint(codex), false);
 });
 
 test('does not allow incomplete, empty, or failed nodes as legacy continuation points', () => {

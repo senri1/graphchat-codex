@@ -106,6 +106,10 @@ import {
   syncConversationContext,
 } from './storage/persistence';
 import { getPayload, putPayload } from './storage/payloads';
+import {
+  EditableNodeRecoveryBuffer,
+  type EditableNodeRecoveryDraft,
+} from './storage/editableNodeRecoveryBuffer';
 import { fontFamilyCss, normalizeFontFamilyKey, type FontFamilyKey } from './ui/typography';
 import { useAttachmentObjectUrls } from './ui/useAttachmentObjectUrls';
 import { compileLatexDocument } from './latex/compiler';
@@ -119,6 +123,7 @@ import {
 import {
   buildLegacyHistory,
   hasUserPrefaceContext,
+  isClaudeCodeHistoryInjectionEndpoint,
   isLegacyContinuationNode,
   type CodexInjectedMessage,
 } from './codex/legacyHistory';
@@ -407,6 +412,13 @@ function isLegacyContinuationEndpoint(
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
   return Boolean(meta.legacyImport?.source === 'graphchatv1' && isLegacyContinuationNode(node));
+}
+
+function isCodexHistoryInjectionEndpoint(
+  meta: ChatRuntimeMeta,
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return isLegacyContinuationEndpoint(meta, node) || isClaudeCodeHistoryInjectionEndpoint(node);
 }
 
 function resolveClaudeCodeSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
@@ -724,13 +736,7 @@ const DEFAULT_CLEANUP_CHAT_FOLDERS_ON_DELETE = true;
 const MULTI_SEND_ASSISTANT_MAX_W_PX = 800;
 const MULTI_SEND_ASSISTANT_GAP_X_PX = 26;
 const EDITABLE_NODE_RECOVERY_STORAGE_KEY = 'graphchat-codex.editable-node-recovery.v1';
-
-type EditableNodeRecoveryDraft = {
-  chatId: string;
-  nodeId: string;
-  content: string;
-  updatedAt: number;
-};
+const EDITABLE_NODE_RECOVERY_DEBOUNCE_MS = 750;
 
 function readEditableNodeRecoveryDrafts(): EditableNodeRecoveryDraft[] {
   if (typeof window === 'undefined') return [];
@@ -766,13 +772,13 @@ function writeEditableNodeRecoveryDrafts(drafts: EditableNodeRecoveryDraft[]): v
   }
 }
 
-function rememberEditableNodeRecoveryDraft(chatIdRaw: string, nodeIdRaw: string, content: string): void {
-  const chatId = String(chatIdRaw ?? '').trim();
-  const nodeId = String(nodeIdRaw ?? '').trim();
-  if (!chatId || !nodeId) return;
-  const drafts = readEditableNodeRecoveryDrafts().filter((entry) => entry.chatId !== chatId || entry.nodeId !== nodeId);
-  drafts.unshift({ chatId, nodeId, content, updatedAt: Date.now() });
-  writeEditableNodeRecoveryDrafts(drafts);
+function rememberEditableNodeRecoveryDrafts(entries: EditableNodeRecoveryDraft[]): void {
+  if (entries.length === 0) return;
+  const incomingKeys = new Set(entries.map((entry) => `${entry.chatId}\u0000${entry.nodeId}`));
+  const drafts = readEditableNodeRecoveryDrafts().filter(
+    (entry) => !incomingKeys.has(`${entry.chatId}\u0000${entry.nodeId}`),
+  );
+  writeEditableNodeRecoveryDrafts([...entries, ...drafts].sort((a, b) => b.updatedAt - a.updatedAt));
 }
 
 function clearEditableNodeRecoveryDraft(chatIdRaw: string, nodeIdRaw: string): void {
@@ -3073,6 +3079,13 @@ export default function App() {
   const engineRef = useRef<WorldEngine | null>(null);
   const editingDraftByNodeIdRef = useRef<Map<string, string>>(new Map());
   const lastEditingNodeIdRef = useRef<string | null>(null);
+  const editableNodeRecoveryBufferRef = useRef<EditableNodeRecoveryBuffer | null>(null);
+  if (!editableNodeRecoveryBufferRef.current) {
+    editableNodeRecoveryBufferRef.current = new EditableNodeRecoveryBuffer({
+      delayMs: EDITABLE_NODE_RECOVERY_DEBOUNCE_MS,
+      onFlush: rememberEditableNodeRecoveryDrafts,
+    });
+  }
   const generationJobsByAssistantIdRef = useRef<Map<string, GenerationJob>>(new Map());
   const resumedLlmJobsRef = useRef(false);
   const inkInputConfig = useMemo<InkInputDebugConfig>(() => {
@@ -3179,6 +3192,33 @@ export default function App() {
     editingText: '',
     tool: 'select',
   }));
+
+  const flushPendingEditableNodeRecoveryDrafts = (): void => {
+    editableNodeRecoveryBufferRef.current?.flush();
+  };
+
+  const discardEditableNodeRecoveryDraft = (chatId: string, nodeId: string): void => {
+    editableNodeRecoveryBufferRef.current?.discard(chatId, nodeId);
+    clearEditableNodeRecoveryDraft(chatId, nodeId);
+  };
+
+  const updateActiveEditingDraft = (nodeIdRaw: string, next: string): void => {
+    const nodeId = String(nodeIdRaw ?? '').trim();
+    if (!nodeId) return;
+    const drafts = editingDraftByNodeIdRef.current;
+    const previous = drafts.get(nodeId);
+    drafts.set(nodeId, next);
+    if (previous === next) return;
+    editableNodeRecoveryBufferRef.current?.schedule(activeChatIdRef.current, nodeId, next);
+  };
+
+  const discardPendingRecoveryDraftsCoveredByState = (chatStates: Map<string, WorldEngineChatState>): void => {
+    editableNodeRecoveryBufferRef.current?.discardMatching((entry) => {
+      const state = chatStates.get(entry.chatId);
+      const node = state?.nodes.find((candidate) => candidate.id === entry.nodeId) ?? null;
+      return Boolean(node && node.kind === 'text' && node.content === entry.content);
+    });
+  };
   const [rawViewer, setRawViewer] = useState<RawViewerState | null>(null);
   const [nodeMenuId, setNodeMenuId] = useState<string | null>(null);
   const [editNodeSendMenuId, setEditNodeSendMenuId] = useState<string | null>(null);
@@ -4146,6 +4186,7 @@ export default function App() {
             showToast('Saving failed. Changes are still pending and will be retried.', 'error', 5200);
           }
         } else {
+          discardPendingRecoveryDraftsCoveredByState(chatStatesRef.current);
           clearPersistedEditableNodeRecoveryDrafts(chatStatesRef.current);
           persistFailureNotifiedRef.current = false;
         }
@@ -4974,9 +5015,9 @@ export default function App() {
     let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
       const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
-      if (!isLegacyContinuationEndpoint(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+      if (!isCodexHistoryInjectionEndpoint(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
         const message =
-          'To continue or branch, reply from an editable document, a completed or stopped Codex response, or an imported GraphChatV1 response.';
+          'To continue or branch with Codex, reply from an editable document, a completed or stopped Codex or Claude Code response, or an imported GraphChatV1 response.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
         if (activeChatIdRef.current === args.chatId) {
           engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
@@ -4987,7 +5028,7 @@ export default function App() {
       try {
         legacyHistory = buildLegacyHistory(state.nodes, parentNode.id);
       } catch (error: any) {
-        const message = error?.message || 'Failed to build the imported GraphChatV1 branch history.';
+        const message = error?.message || 'Failed to build the GraphChat branch history.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
         if (activeChatIdRef.current === args.chatId) {
           engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
@@ -4996,7 +5037,7 @@ export default function App() {
         return;
       }
       if (!legacyHistory.length) {
-        const message = 'The selected imported branch does not contain any text history.';
+        const message = 'The selected branch does not contain any text history.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
         if (activeChatIdRef.current === args.chatId) {
           engineRef.current?.setTextNodeContent(args.assistantNodeId, message, { streaming: false });
@@ -7392,6 +7433,11 @@ export default function App() {
       setUi(next);
       const editingId = typeof next.editingNodeId === 'string' ? next.editingNodeId : null;
       if (editingId !== lastEditingNodeIdRef.current) {
+        const previousEditingId = lastEditingNodeIdRef.current;
+        if (previousEditingId) {
+          flushPendingEditableNodeRecoveryDrafts();
+          editingDraftByNodeIdRef.current.delete(previousEditingId);
+        }
         lastEditingNodeIdRef.current = editingId;
         if (editingId) editingDraftByNodeIdRef.current.set(editingId, next.editingText ?? '');
       }
@@ -7851,6 +7897,7 @@ export default function App() {
 
   useEffect(() => {
     const requestImmediatePersist = () => {
+      flushPendingEditableNodeRecoveryDrafts();
       const engine = engineRef.current;
       if (engine) syncActiveEditingDraftToEngine(engine);
       persistPendingRef.current = true;
@@ -7872,6 +7919,7 @@ export default function App() {
       window.removeEventListener('beforeunload', requestImmediatePersist);
       window.removeEventListener('focus', requestImmediatePersist);
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      flushPendingEditableNodeRecoveryDrafts();
     };
   }, []);
 
@@ -7900,6 +7948,7 @@ export default function App() {
     }
 
     if (engine) {
+      flushPendingEditableNodeRecoveryDrafts();
       syncActiveEditingDraftToEngine(engine);
       engine.commitEditing();
       if (opts?.saveCurrent !== false && prevChatId) {
@@ -9483,6 +9532,7 @@ export default function App() {
   };
 
   async function flushPendingPersistenceForCloudSync(): Promise<void> {
+    flushPendingEditableNodeRecoveryDrafts();
     const engine = engineRef.current;
     if (engine) syncActiveEditingDraftToEngine(engine);
     persistPendingRef.current = true;
@@ -10147,7 +10197,7 @@ export default function App() {
           : null;
       const validHistoryEndpoint = claudeCodeSelected
         ? isLegacyContinuationNode(parentNode)
-        : isLegacyContinuationEndpoint(meta, parentNode);
+        : isCodexHistoryInjectionEndpoint(meta, parentNode);
       if (claudeCodeSelected && isClaudeCodeAssistantNode(parentNode) && !parentRef) {
         showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
         return null;
@@ -10160,7 +10210,7 @@ export default function App() {
         showToast(
           claudeCodeSelected
             ? 'To continue or branch with Claude Code, reply from an editable document or completed response.'
-            : 'To continue or branch, reply from an editable document, a completed or stopped Codex response, or an imported GraphChatV1 response.',
+            : 'To continue or branch with Codex, reply from an editable document, a completed or stopped Codex or Claude Code response, or an imported GraphChatV1 response.',
           'error',
           5200,
         );
@@ -10610,7 +10660,7 @@ export default function App() {
           : null;
       const validHistoryEndpoint = claudeCodeSelected
         ? isLegacyContinuationNode(parent)
-        : isLegacyContinuationEndpoint(meta, parent);
+        : isCodexHistoryInjectionEndpoint(meta, parent);
       if (claudeCodeSelected && isClaudeCodeAssistantNode(parent) && !parentRef) {
         showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
         return null;
@@ -10619,7 +10669,7 @@ export default function App() {
         showToast(
           claudeCodeSelected
             ? 'To continue or branch with Claude Code, send from a user node attached to a completed response.'
-            : 'To continue or branch, send from a user node attached to a completed or stopped Codex response, or an imported GraphChatV1 response.',
+            : 'To continue or branch with Codex, send from a user node attached to a completed or stopped Codex or Claude Code response, or an imported GraphChatV1 response.',
           'error',
           5200,
         );
@@ -11747,12 +11797,7 @@ export default function App() {
               }}
               onDraftChange={(next) => {
                 const id = String(ui.editingNodeId ?? '').trim();
-                if (!id) return;
-                editingDraftByNodeIdRef.current.set(id, next);
-                const engine = engineRef.current;
-                const previous = engine?.getUiState().editingText ?? '';
-                engine?.setEditingText(next);
-                if (previous !== next) rememberEditableNodeRecoveryDraft(activeChatIdRef.current, id, next);
+                updateActiveEditingDraft(id, next);
               }}
               onProjectStateChange={(patch) => {
                 const id = String(ui.editingNodeId ?? '').trim();
@@ -11762,6 +11807,7 @@ export default function App() {
                 const nextContent =
                   patch.content !== undefined ? (typeof patch.content === 'string' ? patch.content : String(patch.content ?? '')) : null;
                 if (nextContent !== null) {
+                  flushPendingEditableNodeRecoveryDrafts();
                   engine.setEditingText(nextContent);
                 }
                 engine.setTextNodeLatexState(id, {
@@ -11790,6 +11836,7 @@ export default function App() {
                 const projectRoot = typeof req?.projectRoot === 'string' ? req.projectRoot.trim() : '';
                 const mainFile = typeof req?.mainFile === 'string' ? req.mainFile.trim() : '';
 
+                flushPendingEditableNodeRecoveryDrafts();
                 engine.setEditingText(source);
                 const prev = engine.getTextNodeLatexState(id);
                 const previousPdfKey =
@@ -11869,6 +11916,7 @@ export default function App() {
                 if (!id) return;
                 const engine = engineRef.current;
                 if (!engine) return;
+                flushPendingEditableNodeRecoveryDrafts();
                 engine.setEditingText(text);
                 engine.onRequestReply?.(id);
               }}
@@ -11910,7 +11958,7 @@ export default function App() {
               onCancel={() => {
                 const id = String(ui.editingNodeId ?? '').trim();
                 engineRef.current?.cancelEditing();
-                if (id) clearEditableNodeRecoveryDraft(activeChatIdRef.current, id);
+                if (id) discardEditableNodeRecoveryDraft(activeChatIdRef.current, id);
               }}
             />
           ) : (
@@ -11924,12 +11972,7 @@ export default function App() {
               contextAttachments={editorContextAttachments}
               onDraftChange={(next) => {
                 const id = String(ui.editingNodeId ?? '').trim();
-                if (!id) return;
-                editingDraftByNodeIdRef.current.set(id, next);
-                const engine = engineRef.current;
-                const previous = engine?.getUiState().editingText ?? '';
-                engine?.setEditingText(next);
-                if (previous !== next) rememberEditableNodeRecoveryDraft(activeChatIdRef.current, id, next);
+                updateActiveEditingDraft(id, next);
               }}
               anchorRect={editorAnchor}
               getScreenRect={() => engineRef.current?.getNodeScreenRect(ui.editingNodeId as string) ?? null}
@@ -11947,6 +11990,7 @@ export default function App() {
                 if (!id) return;
                 const engine = engineRef.current;
                 editingDraftByNodeIdRef.current.set(id, text);
+                flushPendingEditableNodeRecoveryDrafts();
                 engine?.setEditingText(text);
                 let assistantRect: Rect | null = null;
                 const placementClient = opts?.placementClient;
@@ -12009,6 +12053,7 @@ export default function App() {
                 if (!id) return;
                 const engine = engineRef.current;
                 if (!engine) return;
+                flushPendingEditableNodeRecoveryDrafts();
                 engine.setEditingText(text);
                 engine.onRequestReply?.(id);
               }}
@@ -12041,7 +12086,7 @@ export default function App() {
               onCancel={() => {
                 const id = String(ui.editingNodeId ?? '').trim();
                 engineRef.current?.cancelEditing();
-                if (id) clearEditableNodeRecoveryDraft(activeChatIdRef.current, id);
+                if (id) discardEditableNodeRecoveryDraft(activeChatIdRef.current, id);
               }}
             />
           )

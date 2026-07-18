@@ -61,6 +61,17 @@ export function isLegacyContinuationNode(
   );
 }
 
+export function isClaudeCodeHistoryInjectionEndpoint(
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return Boolean(
+    isLegacyContinuationNode(node) &&
+      node.author === 'assistant' &&
+      typeof node.modelId === 'string' &&
+      node.modelId.startsWith('claude-code:'),
+  );
+}
+
 export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexInjectedMessage[] {
   const endId = clean(endNodeId);
   if (!endId) throw new Error('Legacy history endpoint is missing.');

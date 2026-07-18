@@ -1170,6 +1170,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   exportChatState(): WorldEngineChatState {
     const nodes: ChatNode[] = this.nodes.map((n) => {
       if (n.kind === 'text') {
+        const editingDraft = n.id === this.editingNodeId ? this.getEditingDraft?.(n.id) : null;
         return {
           kind: 'text',
           id: n.id,
@@ -1181,7 +1182,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           ...(n.documentNode ? { documentNode: true } : {}),
           ...(n.conversationDraft ? { conversationDraft: true } : {}),
           author: n.author,
-          content: n.content,
+          content: typeof editingDraft === 'string' ? editingDraft : n.content,
           textFormat: n.textFormat ?? 'markdown',
           latexCompileError: n.latexCompileError ?? null,
           latexCompiledAt: Number.isFinite(n.latexCompiledAt) ? n.latexCompiledAt : null,
@@ -4350,10 +4351,11 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   getUiState(): WorldEngineUiState {
-    const editingText =
-      this.editingNodeId && this.nodes.find((n) => n.id === this.editingNodeId && n.kind === 'text')
-        ? (this.nodes.find((n) => n.id === this.editingNodeId && n.kind === 'text') as TextNode).content
-        : '';
+    const editingNode = this.editingNodeId
+      ? (this.nodes.find((n): n is TextNode => n.id === this.editingNodeId && n.kind === 'text') ?? null)
+      : null;
+    const editingDraft = editingNode ? this.getEditingDraft?.(editingNode.id) : null;
+    const editingText = editingNode ? (typeof editingDraft === 'string' ? editingDraft : editingNode.content) : '';
     return {
       selectedNodeId: this.selectedNodeId,
       editingNodeId: this.editingNodeId,
