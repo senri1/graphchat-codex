@@ -38,6 +38,12 @@ function visibleTextForNode(node: Extract<ChatNode, { kind: 'text' }>): string {
   return parts.join('\n\n');
 }
 
+export function isChainedUserTextHistoryNode(
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return Boolean(node?.kind === 'text' && node.author === 'user' && visibleTextForNode(node));
+}
+
 function isStoppedAssistantResponse(node: Extract<ChatNode, { kind: 'text' }>): boolean {
   if (node.author !== 'assistant') return false;
   const error = clean(node.llmError).toLowerCase();

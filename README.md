@@ -154,6 +154,8 @@ Text nodes have explicit storage roles:
 - A bottom-right new text node is an editable Markdown document.
 - A header-reply user node is an editable draft while composing.
 - The reply draft becomes immutable when sent.
+- Chained user text nodes, including an unsent reply draft, form local branch
+  history when a descendant user node is sent.
 - Sent user nodes and assistant nodes are immutable conversation records.
 - All imported GraphChatV1 text nodes are immutable.
 

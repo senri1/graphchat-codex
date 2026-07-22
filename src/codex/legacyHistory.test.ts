@@ -4,6 +4,7 @@ import type { ChatNode } from '../model/chat';
 import {
   buildLegacyHistory,
   hasUserPrefaceContext,
+  isChainedUserTextHistoryNode,
   isClaudeCodeHistoryInjectionEndpoint,
   isLegacyContinuationNode,
 } from './legacyHistory.ts';
@@ -51,6 +52,34 @@ test('merges consecutive nodes with the same role without changing the graph', (
 
   assert.equal(buildLegacyHistory(nodes, 'a1')[0]?.content[0]?.text, 'First\n\nSecond');
   assert.equal(nodes[1]?.parentId, 'u1');
+});
+
+test('uses chained user text drafts as local history for an annotated leaf reply', () => {
+  const document = textNode({ id: 'u1', author: 'user', content: 'Chapter notes' });
+  document.isEditNode = true;
+  document.documentNode = true;
+  const draft = textNode({ id: 'u2', parentId: 'u1', author: 'user', content: 'Unsaved working explanation' });
+  draft.isEditNode = true;
+  draft.conversationDraft = true;
+  const leaf = textNode({
+    id: 'u3',
+    parentId: 'u2',
+    author: 'user',
+    content: 'Can you explain what this is?',
+    userPreface: { contexts: ['Selected definition'] },
+  });
+  leaf.isEditNode = true;
+  leaf.documentNode = true;
+
+  assert.equal(isChainedUserTextHistoryNode(draft), true);
+  assert.equal(hasUserPrefaceContext(leaf), true);
+  assert.deepEqual(buildLegacyHistory([document, draft, leaf], draft.id), [
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Chapter notes\n\nUnsaved working explanation' }],
+    },
+  ]);
 });
 
 test('includes the user preface that formed part of the original prompt', () => {
@@ -234,5 +263,6 @@ test('does not allow incomplete, empty, or failed nodes as legacy continuation p
   assert.equal(isLegacyContinuationNode(failed), false);
   assert.equal(isLegacyContinuationNode(empty), false);
   assert.equal(isLegacyContinuationNode(draft), false);
+  assert.equal(isChainedUserTextHistoryNode(draft), true);
   assert.throws(() => buildLegacyHistory(nodes, failed.id), /failed assistant response/);
 });

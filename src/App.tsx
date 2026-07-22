@@ -123,6 +123,7 @@ import {
 import {
   buildLegacyHistory,
   hasUserPrefaceContext,
+  isChainedUserTextHistoryNode,
   isClaudeCodeHistoryInjectionEndpoint,
   isLegacyContinuationNode,
   type CodexInjectedMessage,
@@ -386,25 +387,32 @@ function resolveCodexSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
 } {
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
   const parentNodeId = typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
+  const parentNode = parentNodeId ? nodes.find((node) => node.id === parentNodeId) ?? null : null;
   if (
     isEditableDocumentNode(userNode) &&
     !hasUserPrefaceContext(userNode) &&
+    !isChainedUserTextHistoryNode(parentNode) &&
     !hasRuntimeConversationAncestor(nodes, parentNodeId)
   ) {
     return { source: null, parentNodeId: null };
   }
   if (!parentNodeId) return { source: null, parentNodeId: null };
-  const parent = nodes.find((node) => node.id === parentNodeId) ?? null;
-  if (!parent || parent.kind !== 'text' || parent.author !== 'assistant') {
+  if (!parentNode || parentNode.kind !== 'text' || parentNode.author !== 'assistant') {
     return { source: null, parentNodeId };
   }
-  return { source: normalizeCodexConversationRef(parent.codexRef), parentNodeId };
+  return { source: normalizeCodexConversationRef(parentNode.codexRef), parentNodeId };
 }
 
 function isEditableDocumentNode(
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
   return Boolean(node?.kind === 'text' && node.isEditNode && !node.conversationDraft);
+}
+
+function isLocalUserTextHistoryEndpoint(
+  node: ChatNode | null | undefined,
+): node is Extract<ChatNode, { kind: 'text' }> {
+  return isEditableDocumentNode(node) || isChainedUserTextHistoryNode(node);
 }
 
 function isLegacyContinuationEndpoint(
@@ -428,20 +436,21 @@ function resolveClaudeCodeSourceForUserNode(nodes: ChatNode[], userNodeId: strin
   const userNode = nodes.find((node) => node.id === userNodeId) ?? null;
   const parentNodeId =
     typeof userNode?.parentId === 'string' && userNode.parentId.trim() ? userNode.parentId.trim() : null;
+  const parentNode = parentNodeId ? nodes.find((node) => node.id === parentNodeId) ?? null : null;
   if (
     isEditableDocumentNode(userNode) &&
     !hasUserPrefaceContext(userNode) &&
+    !isChainedUserTextHistoryNode(parentNode) &&
     !hasRuntimeConversationAncestor(nodes, parentNodeId)
   ) {
     return { source: null, parentNodeId: null };
   }
   if (!parentNodeId) return { source: null, parentNodeId: null };
-  const parent = nodes.find((node) => node.id === parentNodeId) ?? null;
-  if (!parent || parent.kind !== 'text' || parent.author !== 'assistant') {
+  if (!parentNode || parentNode.kind !== 'text' || parentNode.author !== 'assistant') {
     return { source: null, parentNodeId };
   }
   return {
-    source: normalizeClaudeCodeConversationRef(parent.canonicalMeta),
+    source: normalizeClaudeCodeConversationRef(parentNode.canonicalMeta),
     parentNodeId,
   };
 }
@@ -5015,7 +5024,7 @@ export default function App() {
     let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
       const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
-      if (!isCodexHistoryInjectionEndpoint(meta, parentNode) && !isEditableDocumentNode(parentNode)) {
+      if (!isCodexHistoryInjectionEndpoint(meta, parentNode) && !isLocalUserTextHistoryEndpoint(parentNode)) {
         const message =
           'To continue or branch with Codex, reply from an editable document, a completed or stopped Codex or Claude Code response, or an imported GraphChatV1 response.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
@@ -5420,7 +5429,7 @@ export default function App() {
         showToast(message, 'error', 6200);
         return;
       }
-      if (!isLegacyContinuationNode(parentNode) && !isEditableDocumentNode(parentNode)) {
+      if (!isLegacyContinuationNode(parentNode) && !isLocalUserTextHistoryEndpoint(parentNode)) {
         const message = 'Reply from a completed response or editable document to start a Claude Code branch.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, {
           content: message,
@@ -10198,6 +10207,7 @@ export default function App() {
       const validHistoryEndpoint = claudeCodeSelected
         ? isLegacyContinuationNode(parentNode)
         : isCodexHistoryInjectionEndpoint(meta, parentNode);
+      const validLocalUserHistoryEndpoint = isLocalUserTextHistoryEndpoint(parentNode);
       if (claudeCodeSelected && isClaudeCodeAssistantNode(parentNode) && !parentRef) {
         showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
         return null;
@@ -10206,7 +10216,7 @@ export default function App() {
         showToast('This note belongs to a runtime branch and is read-only conversation context.', 'error', 5200);
         return null;
       }
-      if (!parentRef && !validHistoryEndpoint && !isEditableDocumentNode(parentNode)) {
+      if (!parentRef && !validHistoryEndpoint && !validLocalUserHistoryEndpoint) {
         showToast(
           claudeCodeSelected
             ? 'To continue or branch with Claude Code, reply from an editable document or completed response.'
@@ -10661,11 +10671,12 @@ export default function App() {
       const validHistoryEndpoint = claudeCodeSelected
         ? isLegacyContinuationNode(parent)
         : isCodexHistoryInjectionEndpoint(meta, parent);
+      const validLocalUserHistoryEndpoint = isLocalUserTextHistoryEndpoint(parent);
       if (claudeCodeSelected && isClaudeCodeAssistantNode(parent) && !parentRef) {
         showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
         return null;
       }
-      if (!parentRef && !validHistoryEndpoint) {
+      if (!parentRef && !validHistoryEndpoint && !validLocalUserHistoryEndpoint) {
         showToast(
           claudeCodeSelected
             ? 'To continue or branch with Claude Code, send from a user node attached to a completed response.'
