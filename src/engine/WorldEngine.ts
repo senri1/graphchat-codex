@@ -4915,7 +4915,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
   private isHeaderSendEnabled(node: TextNode | InkNode): boolean {
     if (node.kind === 'ink') return true;
-    return Boolean(node.isEditNode) && !this.isLatexTextNode(node);
+    return Boolean(node.isEditNode || node.author === 'user') && !this.isLatexTextNode(node);
   }
 
   private collectHeaderContextAttachmentKeys(startNodeId: string): string[] {
