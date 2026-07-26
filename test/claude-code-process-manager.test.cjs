@@ -146,10 +146,15 @@ test('new Claude Code turns use print streaming and an explicit session id', () 
   assert.equal(args.includes('Fix the test'), false);
 });
 
-test('Opus 4.8 requests thinking summaries without changing other Claude models', () => {
-  const opusArgs = buildClaudeCodeArgs({
+test('Opus 4.8 and Opus 5 request thinking summaries without changing other Claude models', () => {
+  const opus48Args = buildClaudeCodeArgs({
     prompt: 'Explain the result',
     model: 'claude-opus-4-8',
+    permissionMode: 'read-only',
+  });
+  const opus5Args = buildClaudeCodeArgs({
+    prompt: 'Explain the result',
+    model: 'claude-opus-5',
     permissionMode: 'read-only',
   });
   const sonnetArgs = buildClaudeCodeArgs({
@@ -159,7 +164,11 @@ test('Opus 4.8 requests thinking summaries without changing other Claude models'
   });
 
   assert.deepEqual(
-    opusArgs.slice(opusArgs.indexOf('--thinking-display'), opusArgs.indexOf('--thinking-display') + 2),
+    opus48Args.slice(opus48Args.indexOf('--thinking-display'), opus48Args.indexOf('--thinking-display') + 2),
+    ['--thinking-display', 'summarized'],
+  );
+  assert.deepEqual(
+    opus5Args.slice(opus5Args.indexOf('--thinking-display'), opus5Args.indexOf('--thinking-display') + 2),
     ['--thinking-display', 'summarized'],
   );
   assert.equal(sonnetArgs.includes('--thinking-display'), false);

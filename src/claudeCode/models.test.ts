@@ -15,14 +15,15 @@ function effortsFor(apiModel: string): Array<string | undefined> {
 test('exposes versioned Claude Code models with model-specific effort levels', () => {
   assert.deepEqual(effortsFor('claude-fable-5'), ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.deepEqual(effortsFor('claude-opus-4-8'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(effortsFor('claude-opus-5'), ['low', 'medium', 'high', 'xhigh', 'max']);
   assert.deepEqual(effortsFor('claude-sonnet-4-6'), ['low', 'medium', 'high', 'max']);
   assert.deepEqual(effortsFor('claude-haiku-4-5-20251001'), [undefined]);
-  assert.equal(CLAUDE_CODE_MODELS.length, 15);
+  assert.equal(CLAUDE_CODE_MODELS.length, 20);
 });
 
 test('model labels include exact versions and full CLI model ids', () => {
   for (const model of CLAUDE_CODE_MODELS) {
-    assert.match(model.shortLabel ?? '', /^Claude (Fable 5|Opus 4\.8|Sonnet 4\.6|Haiku 4\.5)/);
+    assert.match(model.shortLabel ?? '', /^Claude (Fable 5|Opus (4\.8|5)|Sonnet 4\.6|Haiku 4\.5)/);
     assert.match(model.label, new RegExp(`\\[${model.apiModel}\\]$`));
   }
 });
@@ -30,7 +31,7 @@ test('model labels include exact versions and full CLI model ids', () => {
 test('migrates the original moving aliases to versioned defaults', () => {
   assert.equal(
     migrateClaudeCodeModelId('claude-code:opus'),
-    'claude-code:claude-opus-4-8:high',
+    'claude-code:claude-opus-5:high',
   );
   assert.equal(
     migrateClaudeCodeModelId('claude-code:sonnet'),

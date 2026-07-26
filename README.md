@@ -399,12 +399,12 @@ thread state are machine-specific. Use local exports and backups for recovery.
 ## Claude Code CLI
 
 When Claude Code is installed, the composer offers versioned model choices:
-`Claude Fable 5`, `Claude Opus 4.8`, `Claude Sonnet 4.6`, and
+`Claude Fable 5`, `Claude Opus 5`, `Claude Opus 4.8`, `Claude Sonnet 4.6`, and
 `Claude Haiku 4.5`. GraphChat passes their full Claude Code model IDs instead of
 the moving `fable`, `opus`, `sonnet`, and `haiku` aliases.
 
 Supported effort levels are shown as separate model choices. Fable 5 and
-Opus 4.8 support `low`, `medium`, `high`, `xhigh`, and `max`; Sonnet 4.6
+Opus 5 and 4.8 support `low`, `medium`, `high`, `xhigh`, and `max`; Sonnet 4.6
 supports `low`, `medium`, `high`, and `max`. Haiku 4.5 does not expose an
 effort control. These choices launch the local `claude` executable in print
 mode with streaming JSON and pass the selected level through `--effort`, so

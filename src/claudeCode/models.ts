@@ -15,6 +15,11 @@ const MODEL_DEFINITIONS: ClaudeCodeModelDefinition[] = [
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
   },
   {
+    id: 'claude-opus-5',
+    name: 'Claude Opus 5',
+    efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+  },
+  {
     id: 'claude-opus-4-8',
     name: 'Claude Opus 4.8',
     efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
@@ -61,7 +66,7 @@ export const CLAUDE_CODE_MODELS: ModelInfo[] = MODEL_DEFINITIONS.flatMap((defini
 );
 
 const LEGACY_MODEL_SELECTIONS: Record<string, string> = {
-  'claude-code:opus': 'claude-code:claude-opus-4-8:high',
+  'claude-code:opus': 'claude-code:claude-opus-5:high',
   'claude-code:sonnet': 'claude-code:claude-sonnet-4-6:high',
   'claude-code:haiku': 'claude-code:claude-haiku-4-5-20251001',
 };

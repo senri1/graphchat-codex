@@ -200,7 +200,9 @@ function buildClaudeCodeArgs(args) {
     permissions.cliMode,
     ...permissions.extraArgs,
   ];
-  if (model === 'claude-opus-4-8') cliArgs.push('--thinking-display', 'summarized');
+  if (model === 'claude-opus-4-8' || model === 'claude-opus-5') {
+    cliArgs.push('--thinking-display', 'summarized');
+  }
   if (effort) cliArgs.push('--effort', effort);
   if (appendSystemPrompt) cliArgs.push('--append-system-prompt', appendSystemPrompt);
   if (sourceSessionId) {
