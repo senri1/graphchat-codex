@@ -734,6 +734,8 @@ export class WorldEngine {
 
   private raf: number | null = null;
   private interacting = false;
+  private textScrollInteracting = false;
+  private textScrollPersistPending = false;
 
   private lastDebugEmitAt = 0;
   private lastFramePerf: WorldEngineFramePerf | null = null;
@@ -1148,7 +1150,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         if (v) this.suspendRasterQueueWorkForInteraction();
         this.interacting = v;
         this.requestRender();
-        if (!v) this.kickRasterQueuesAfterViewportUpdate();
+        if (!this.isRasterWorkSuspended()) this.kickRasterQueuesAfterViewportUpdate();
         this.emitDebug({ force: true });
       },
       onPointerDown: (p, info) => this.handlePointerDown(p, info),
@@ -1168,6 +1170,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   exportChatState(): WorldEngineChatState {
+    // Persistence can snapshot while the scroll idle timer is still pending (for
+    // example during chat switching or pagehide). Preserve the native DOM position
+    // without forcing the interaction to end or scheduling a re-entrant save.
+    const pendingTextScroll = this.textLod2?.getPendingScrollPosition() ?? null;
     const nodes: ChatNode[] = this.nodes.map((n) => {
       if (n.kind === 'text') {
         const editingDraft = n.id === this.editingNodeId ? this.getEditingDraft?.(n.id) : null;
@@ -1211,8 +1217,14 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           thinkingSummary: n.thinkingSummary,
           summaryExpanded: n.summaryExpanded,
           expandedSummaryChunks: n.expandedSummaryChunks,
-          contentScrollX: n.contentScrollX,
-          contentScrollY: n.contentScrollY,
+          contentScrollX:
+            pendingTextScroll?.nodeId === n.id
+              ? Math.max(0, Math.round(pendingTextScroll.scrollLeft)) || undefined
+              : n.contentScrollX,
+          contentScrollY:
+            pendingTextScroll?.nodeId === n.id
+              ? Math.max(0, Math.round(pendingTextScroll.scrollTop)) || undefined
+              : n.contentScrollY,
           attachments: Array.isArray(n.attachments) ? n.attachments : undefined,
           selectedAttachmentKeys: Array.isArray(n.selectedAttachmentKeys) ? n.selectedAttachmentKeys : undefined,
         };
@@ -1271,6 +1283,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     };
   }
 
+  flushPendingTextScroll(): boolean {
+    return this.textLod2?.flushScrollInteraction() ?? false;
+  }
+
   loadChatState(next: WorldEngineChatState): void {
     // Tear down any active interactions/overlays first to avoid dangling DOM selection.
     this.editingNodeId = null;
@@ -1297,6 +1313,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     } catch {
       // ignore
     }
+
+    // Hiding can flush a pending scroll and create a handoff for the old chat.
+    this.textResizeHold = null;
 
     // Cancel queued work from the previous chat.
     this.clearEdgeRouteCache();
@@ -3490,30 +3509,50 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
   private kickTextRasterQueue(): void {
     if (this.textRasterRunning) return;
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
     if (this.textRasterQueueByNodeId.size === 0) return;
     void this.runTextRasterQueue();
   }
 
   private kickFullTextNodeRasterQueue(): void {
     if (this.fullTextNodeRasterRunning) return;
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
     if (this.fullTextNodeRasterQueueByNodeId.size === 0) return;
     void this.runFullTextNodeRasterQueue();
   }
 
   private kickInkPrefaceRasterQueue(): void {
     if (this.inkPrefaceRasterRunning) return;
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
     if (this.inkPrefaceRasterQueueByNodeId.size === 0) return;
     void this.runInkPrefaceRasterQueue();
   }
 
   private kickPdfPageRenderQueue(): void {
     if (this.pdfPageRenderRunning) return;
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
     if (this.pdfPageRenderQueue.size === 0) return;
     void this.runPdfPageRenderQueue();
+  }
+
+  private isRasterWorkSuspended(): boolean {
+    return this.interacting || this.textScrollInteracting;
+  }
+
+  private setTextScrollInteracting(next: boolean): void {
+    if (this.textScrollInteracting === next) return;
+    if (next) this.suspendRasterQueueWorkForInteraction();
+    this.textScrollInteracting = next;
+    this.requestRender();
+    if (!this.isRasterWorkSuspended()) this.kickRasterQueuesAfterViewportUpdate();
+
+    // Report the end transition before scheduling this session's save. App updates
+    // its interaction gate in that callback, so the debounced save can run normally.
+    this.emitDebug({ force: true });
+    if (!next && this.textScrollPersistPending) {
+      this.textScrollPersistPending = false;
+      this.requestPersist();
+    }
   }
 
   private suspendRasterQueueWorkForInteraction(): void {
@@ -3528,7 +3567,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
   private kickRasterQueuesAfterViewportUpdate(): void {
     requestAnimationFrame(() => {
-      if (this.interacting) return;
+      if (this.isRasterWorkSuspended()) return;
       this.kickFullTextNodeRasterQueue();
       this.kickTextRasterQueue();
       this.kickInkPrefaceRasterQueue();
@@ -3543,7 +3582,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     try {
       while (this.textRasterQueueByNodeId.size > 0) {
-        if (this.interacting) return;
+        if (this.isRasterWorkSuspended()) return;
         if (this.textRasterGeneration !== gen) return;
 
         const next = this.textRasterQueueByNodeId.entries().next();
@@ -3626,7 +3665,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       }
     } finally {
       this.textRasterRunning = false;
-      if (!this.interacting && this.textRasterQueueByNodeId.size > 0) {
+      if (!this.isRasterWorkSuspended() && this.textRasterQueueByNodeId.size > 0) {
         // If work remains, schedule another burst.
         this.kickTextRasterQueue();
       }
@@ -3640,7 +3679,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     try {
       while (this.fullTextNodeRasterQueueByNodeId.size > 0) {
-        if (this.interacting) return;
+        if (this.isRasterWorkSuspended()) return;
         if (this.fullTextNodeRasterGeneration !== gen) return;
 
         const next = this.fullTextNodeRasterQueueByNodeId.entries().next();
@@ -3715,7 +3754,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       }
     } finally {
       this.fullTextNodeRasterRunning = false;
-      if (!this.interacting && this.fullTextNodeRasterQueueByNodeId.size > 0) {
+      if (!this.isRasterWorkSuspended() && this.fullTextNodeRasterQueueByNodeId.size > 0) {
         this.kickFullTextNodeRasterQueue();
       }
     }
@@ -3728,7 +3767,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     try {
       while (this.inkPrefaceRasterQueueByNodeId.size > 0) {
-        if (this.interacting) return;
+        if (this.isRasterWorkSuspended()) return;
         if (this.inkPrefaceRasterGeneration !== gen) return;
 
         const next = this.inkPrefaceRasterQueueByNodeId.entries().next();
@@ -3805,7 +3844,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       }
     } finally {
       this.inkPrefaceRasterRunning = false;
-      if (!this.interacting && this.inkPrefaceRasterQueueByNodeId.size > 0) {
+      if (!this.isRasterWorkSuspended() && this.inkPrefaceRasterQueueByNodeId.size > 0) {
         this.kickInkPrefaceRasterQueue();
       }
     }
@@ -3817,7 +3856,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     try {
       while (this.pdfPageRenderQueue.size > 0) {
-        if (this.interacting) return;
+        if (this.isRasterWorkSuspended()) return;
 
         const next = this.pdfPageRenderQueue.entries().next();
         if (next.done) return;
@@ -3837,7 +3876,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       }
     } finally {
       this.pdfPageRenderRunning = false;
-      if (!this.interacting && this.pdfPageRenderQueue.size > 0) {
+      if (!this.isRasterWorkSuspended() && this.pdfPageRenderQueue.size > 0) {
         this.kickPdfPageRenderQueue();
       }
     }
@@ -7421,12 +7460,11 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         this.textResizeHold = { nodeId: node.id, sig, expiresAt: performance.now() + 2200 };
       }
 
+      this.textScrollPersistPending = true;
       this.requestRender();
-      try {
-        this.onRequestPersist?.();
-      } catch {
-        // ignore
-      }
+    };
+    overlay.onScrollInteractionChange = (active) => {
+      this.setTextScrollInteracting(active);
     };
 
     this.textLod2 = overlay;
@@ -7906,32 +7944,48 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   private computeTextLod2Target(): { nodeId: string; mode: TextLod2Mode } | null {
     const editingId = this.editingNodeId;
     const rawId = this.rawViewerNodeId;
-    if (this.pdfAnnotationPlacement || this.textAnnotationPlacement) return null;
+    if (this.pdfAnnotationPlacement || this.textAnnotationPlacement) {
+      this.textResizeHold = null;
+      return null;
+    }
+
+    const concreteTarget = (nodeId: string, mode: TextLod2Mode) => {
+      if (this.textResizeHold && this.textResizeHold.nodeId !== nodeId) this.textResizeHold = null;
+      return { nodeId, mode };
+    };
+
+    const overlay = this.textLod2;
+    if (overlay?.isScrollInteractionActive()) {
+      const nodeId = overlay.getPendingScrollPosition()?.nodeId ?? overlay.getNodeId();
+      const node = nodeId
+        ? (this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === nodeId) ?? null)
+        : null;
+      if (node && node.id !== rawId && node.id !== editingId) return concreteTarget(node.id, 'select');
+    }
 
     const g = this.activeGesture;
     if (g?.kind === 'resize') {
       const node = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === g.nodeId) ?? null;
-      if (node && node.id !== editingId) return { nodeId: g.nodeId, mode: 'resize' };
+      if (node && node.id !== editingId) return concreteTarget(g.nodeId, 'resize');
     }
 
     if (this.textSelectNodeId && this.textSelectNodeId !== rawId && this.textSelectNodeId !== editingId) {
-      return { nodeId: this.textSelectNodeId, mode: 'select' };
+      return concreteTarget(this.textSelectNodeId, 'select');
     }
 
-    const overlay = this.textLod2;
     if (overlay?.isMenuOpen()) {
       const nodeId = overlay.getNodeId();
-      if (nodeId && nodeId !== rawId && nodeId !== editingId) return { nodeId, mode: 'select' };
+      if (nodeId && nodeId !== rawId && nodeId !== editingId) return concreteTarget(nodeId, 'select');
     }
 
     if (this.hoverTextNodeId && this.hoverTextNodeId !== rawId && this.hoverTextNodeId !== editingId) {
-      return { nodeId: this.hoverTextNodeId, mode: 'select' };
+      return concreteTarget(this.hoverTextNodeId, 'select');
     }
 
     // Touch devices don't have hover; keep the selected text node "interactive" so it can be scrolled/read.
     if (this.touchUi && this.selectedNodeId && this.selectedNodeId !== rawId && this.selectedNodeId !== editingId) {
       const selectedText = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === this.selectedNodeId) ?? null;
-      if (selectedText) return { nodeId: selectedText.id, mode: 'select' };
+      if (selectedText) return concreteTarget(selectedText.id, 'select');
     }
 
     // While an assistant is streaming, pin the LOD2 overlay to the generating node so
@@ -7941,7 +7995,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       ? (this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === this.selectedNodeId) ?? null)
       : null;
     if (selected?.isGenerating && selected.id !== editingId && selected.id !== rawId && rectsIntersect(selected.rect, view)) {
-      return { nodeId: selected.id, mode: 'select' };
+      return concreteTarget(selected.id, 'select');
     }
 
     for (let i = this.nodes.length - 1; i >= 0; i -= 1) {
@@ -7951,7 +8005,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       if (n.id === editingId) continue;
       if (n.id === rawId) continue;
       if (!rectsIntersect(n.rect, view)) continue;
-      return { nodeId: n.id, mode: 'select' };
+      return concreteTarget(n.id, 'select');
     }
 
     const hold = this.textResizeHold;
@@ -8078,15 +8132,20 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       scrollLeft: desiredScrollLeft,
     });
 
-    const actualScrollTop = Math.max(0, Math.round(lod2.getContentElement().scrollTop || 0));
-    const actualScrollLeft = Math.max(0, Math.round(lod2.getContentElement().scrollLeft || 0));
-    if (actualScrollTop !== desiredScrollTop || actualScrollLeft !== desiredScrollLeft) {
-      node.contentScrollY = actualScrollTop > 0 ? actualScrollTop : undefined;
-      node.contentScrollX = actualScrollLeft > 0 ? actualScrollLeft : undefined;
-      try {
-        this.onRequestPersist?.();
-      } catch {
-        // ignore
+    // Native scroll owns the live position for the duration of a scroll session.
+    // Reconciling here would bypass the session debounce and schedule persistence
+    // or a scroll-position raster from an unrelated draw.
+    if (!lod2.isScrollInteractionActive()) {
+      const actualScrollTop = Math.max(0, Math.round(lod2.getContentElement().scrollTop || 0));
+      const actualScrollLeft = Math.max(0, Math.round(lod2.getContentElement().scrollLeft || 0));
+      if (actualScrollTop !== desiredScrollTop || actualScrollLeft !== desiredScrollLeft) {
+        node.contentScrollY = actualScrollTop > 0 ? actualScrollTop : undefined;
+        node.contentScrollX = actualScrollLeft > 0 ? actualScrollLeft : undefined;
+        try {
+          this.onRequestPersist?.();
+        } catch {
+          // ignore
+        }
       }
     }
     this.updateTextLod2HitZonesFromOverlay(node.id, node.displayHash, lod2);
@@ -8619,7 +8678,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
   private chooseTextRasterScale(): number {
     const ideal = (this.camera.zoom || 1) * (this.dpr || 1);
-    const cap = this.interacting ? 1 : 2;
+    const cap = this.isRasterWorkSuspended() ? 1 : 2;
     const target = Math.max(0.5, Math.min(cap, ideal));
     if (target < 0.75) return 0.5;
     if (target < 1.5) return 1;
@@ -8628,7 +8687,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
   private choosePdfRasterScale(visibleWorldArea: number): number {
     const ideal = (this.camera.zoom || 1) * (this.dpr || 1);
-    const cap = this.interacting ? 1 : 2;
+    const cap = this.isRasterWorkSuspended() ? 1 : 2;
 
     // Budget aims to keep *visible* pages stable in cache without thrash.
     // Leave slack for previously-viewed pages and overhead.
@@ -8693,7 +8752,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private updateFullTextNodeRastersForViewport(): void {
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
 
     const view = this.worldViewportRect({ overscan: 320 });
     const desiredScale = this.chooseTextRasterScale();
@@ -8737,7 +8796,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private updateTextRastersForViewport(): void {
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
 
     const view = this.worldViewportRect({ overscan: 320 });
     const desiredScale = this.chooseTextRasterScale();
@@ -8788,7 +8847,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private updateInkPrefaceRastersForViewport(): void {
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
 
     const view = this.worldViewportRect({ overscan: 320 });
     const desiredScale = this.chooseTextRasterScale();
@@ -8835,7 +8894,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private updatePdfPageRendersForViewport(): void {
-    if (this.interacting) return;
+    if (this.isRasterWorkSuspended()) return;
 
     const view = this.worldViewportRect({ overscan: 360 });
     const visible: Array<{
@@ -11002,7 +11061,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       cameraX: this.camera.x,
       cameraY: this.camera.y,
       zoom: this.camera.zoom,
-      interacting: this.interacting,
+      interacting: this.isRasterWorkSuspended(),
       ...(this.lastFramePerf ? { framePerf: this.lastFramePerf } : {}),
     });
   }

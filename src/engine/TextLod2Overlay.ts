@@ -1,5 +1,6 @@
 import type { Rect } from './types';
 import { normalizeMathDelimitersFromCopyTex } from '../markdown/mathDelimiters';
+import { TextScrollSession, type TextScrollPosition } from './TextScrollSession';
 
 export type TextLod2Mode = 'resize' | 'select';
 
@@ -303,10 +304,8 @@ export class TextLod2Overlay {
   private prevOverflowY: string | null = null;
   private lockScrollTop: number | null = null;
   private lockScrollLeft: number | null = null;
-  private scrollCommitTimer: number | null = null;
-  private pendingScrollNodeId: string | null = null;
-  private pendingScrollTop = 0;
-  private pendingScrollLeft = 0;
+  private readonly scrollSession: TextScrollSession;
+  private programmaticScrollTarget: TextScrollPosition | null = null;
 
   onRequestCloseSelection?: () => void;
   onRequestAction?: (action: TextLod2Action) => void;
@@ -331,6 +330,7 @@ export class TextLod2Overlay {
     trigger?: AnnotatePointerTrigger | null,
   ) => void;
   onScrollCommit?: (nodeId: string, scrollTop: number, scrollLeft: number) => void;
+  onScrollInteractionChange?: (active: boolean) => void;
 
   setBaseTextStyle(style: { fontFamily?: string; fontSizePx?: number; lineHeight?: number; color?: string }): void {
     try {
@@ -583,56 +583,24 @@ export class TextLod2Overlay {
     if (handled) e.preventDefault();
   };
 
-  private readonly onRootPointerUpOrCancel = () => {
-    this.flushPendingScrollCommit();
+  private readonly onRootPointerUpOrCancel = (e: PointerEvent) => {
+    // Touch pointer-up happens before inertial scrolling finishes. Let the idle
+    // timer observe the momentum scroll events instead of ending the session early.
+    if (e.pointerType === 'touch') return;
+    this.scrollSession.flush();
   };
 
-  private clearScrollCommitTimer(): void {
-    if (this.scrollCommitTimer == null) return;
-    try {
-      window.clearTimeout(this.scrollCommitTimer);
-    } catch {
-      // ignore
-    }
-    this.scrollCommitTimer = null;
-  }
+  private readonly onWindowBlur = () => {
+    this.scrollSession.flush();
+  };
 
-  private recordPendingScroll(nodeId?: string | null): void {
-    const targetNodeId = typeof nodeId === 'string' && nodeId ? nodeId : this.visibleNodeId;
-    if (!targetNodeId) return;
-    this.pendingScrollNodeId = targetNodeId;
-    this.pendingScrollTop = Math.max(0, Number(this.content.scrollTop) || 0);
-    this.pendingScrollLeft = Math.max(0, Number(this.content.scrollLeft) || 0);
-  }
+  private readonly onVisibilityChange = () => {
+    if (document.visibilityState === 'hidden') this.scrollSession.flush();
+  };
 
-  // Scroll is rendered natively by the overlay, so only commit it back once scrolling settles.
-  private scheduleScrollCommit(delayMs = 160): void {
-    this.recordPendingScroll();
-    if (!this.pendingScrollNodeId) return;
-    this.clearScrollCommitTimer();
-    this.scrollCommitTimer = window.setTimeout(() => {
-      this.scrollCommitTimer = null;
-      this.flushPendingScrollCommit();
-    }, delayMs);
-  }
-
-  private flushPendingScrollCommit(): void {
-    const nodeId = this.pendingScrollNodeId;
-    if (!nodeId) return;
-
-    this.clearScrollCommitTimer();
-    const scrollTop = Math.max(0, Number(this.pendingScrollTop) || 0);
-    const scrollLeft = Math.max(0, Number(this.pendingScrollLeft) || 0);
-    this.pendingScrollNodeId = null;
-    this.pendingScrollTop = 0;
-    this.pendingScrollLeft = 0;
-
-    try {
-      this.onScrollCommit?.(nodeId, scrollTop, scrollLeft);
-    } catch {
-      // ignore
-    }
-  }
+  private readonly onPageExit = () => {
+    this.scrollSession.flush();
+  };
 
   private readonly onContentScroll = () => {
     if (this.suppressScrollCallback) return;
@@ -657,7 +625,27 @@ export class TextLod2Overlay {
       }
       return;
     }
-    this.scheduleScrollCommit();
+    const nodeId = this.visibleNodeId;
+    if (!nodeId) return;
+
+    const programmatic = this.programmaticScrollTarget;
+    if (programmatic?.nodeId === nodeId) {
+      const actualTop = Math.max(0, Number(this.content.scrollTop) || 0);
+      const actualLeft = Math.max(0, Number(this.content.scrollLeft) || 0);
+      this.programmaticScrollTarget = null;
+      if (
+        Math.abs(actualTop - programmatic.scrollTop) < 0.5 &&
+        Math.abs(actualLeft - programmatic.scrollLeft) < 0.5
+      ) {
+        return;
+      }
+    }
+
+    this.scrollSession.record({
+      nodeId,
+      scrollTop: this.content.scrollTop,
+      scrollLeft: this.content.scrollLeft,
+    });
   };
 
   private finishNativeSelection = () => {
@@ -776,6 +764,22 @@ export class TextLod2Overlay {
     this.onRequestPenTextSelectPointerCancel = opts.onRequestPenTextSelectPointerCancel;
     this.onRequestAnnotateTextSelection = opts.onRequestAnnotateTextSelection;
     this.onRequestAnnotateInkSelection = opts.onRequestAnnotateInkSelection;
+    this.scrollSession = new TextScrollSession({
+      onInteractionChange: (active) => {
+        try {
+          this.onScrollInteractionChange?.(active);
+        } catch {
+          // ignore
+        }
+      },
+      onCommit: ({ nodeId, scrollTop, scrollLeft }) => {
+        try {
+          this.onScrollCommit?.(nodeId, scrollTop, scrollLeft);
+        } catch {
+          // ignore
+        }
+      },
+    });
 
     const root = document.createElement('div');
     root.className = 'gc-textLod2';
@@ -1015,17 +1019,22 @@ export class TextLod2Overlay {
     menu.addEventListener('wheel', stopMenuPointer, { passive: true } as any);
 
     document.addEventListener('pointerdown', this.onDocPointerDownCapture, true);
+    document.addEventListener('visibilitychange', this.onVisibilityChange);
     window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('blur', this.onWindowBlur);
+    window.addEventListener('pagehide', this.onPageExit);
+    window.addEventListener('beforeunload', this.onPageExit);
   }
 
   dispose(): void {
-    this.clearScrollCommitTimer();
-    this.pendingScrollNodeId = null;
-    this.pendingScrollTop = 0;
-    this.pendingScrollLeft = 0;
+    this.scrollSession.flush();
     try {
       document.removeEventListener('pointerdown', this.onDocPointerDownCapture, true);
+      document.removeEventListener('visibilitychange', this.onVisibilityChange);
       window.removeEventListener('keydown', this.onKeyDown);
+      window.removeEventListener('blur', this.onWindowBlur);
+      window.removeEventListener('pagehide', this.onPageExit);
+      window.removeEventListener('beforeunload', this.onPageExit);
     } catch {
       // ignore
     }
@@ -1061,6 +1070,18 @@ export class TextLod2Overlay {
 
   isMenuOpen(): boolean {
     return this.menu.style.display !== 'none';
+  }
+
+  isScrollInteractionActive(): boolean {
+    return this.scrollSession.isActive();
+  }
+
+  getPendingScrollPosition(): TextScrollPosition | null {
+    return this.scrollSession.getPending();
+  }
+
+  flushScrollInteraction(): boolean {
+    return this.scrollSession.flush();
   }
 
   withPointerEventsEnabled<T>(fn: () => T): T {
@@ -1099,7 +1120,10 @@ export class TextLod2Overlay {
     const nodeChanged = prevNodeId !== opts.nodeId;
     const hashChanged = prevHash !== opts.contentHash;
 
-    if (nodeChanged) this.flushPendingScrollCommit();
+    if (nodeChanged) {
+      this.scrollSession.flush();
+      this.programmaticScrollTarget = null;
+    }
 
     this.visibleNodeId = opts.nodeId;
     this.mode = opts.mode;
@@ -1155,6 +1179,11 @@ export class TextLod2Overlay {
       try {
         if (desiredTop != null) this.content.scrollTop = desiredTop;
         if (desiredLeft != null) this.content.scrollLeft = desiredLeft;
+        this.programmaticScrollTarget = {
+          nodeId: opts.nodeId,
+          scrollTop: Math.max(0, Number(this.content.scrollTop) || 0),
+          scrollLeft: Math.max(0, Number(this.content.scrollLeft) || 0),
+        };
       } catch {
         // ignore
       } finally {
@@ -1169,7 +1198,8 @@ export class TextLod2Overlay {
   }
 
   hide(): void {
-    this.flushPendingScrollCommit();
+    this.scrollSession.flush();
+    this.programmaticScrollTarget = null;
     this.visibleNodeId = null;
     this.mode = null;
     this.contentHash = null;

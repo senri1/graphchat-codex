@@ -7908,7 +7908,10 @@ export default function App() {
     const requestImmediatePersist = () => {
       flushPendingEditableNodeRecoveryDrafts();
       const engine = engineRef.current;
-      if (engine) syncActiveEditingDraftToEngine(engine);
+      if (engine) {
+        syncActiveEditingDraftToEngine(engine);
+        engine.flushPendingTextScroll();
+      }
       persistPendingRef.current = true;
       if (persistTimerRef.current != null) {
         window.clearTimeout(persistTimerRef.current);
@@ -9543,7 +9546,10 @@ export default function App() {
   async function flushPendingPersistenceForCloudSync(): Promise<void> {
     flushPendingEditableNodeRecoveryDrafts();
     const engine = engineRef.current;
-    if (engine) syncActiveEditingDraftToEngine(engine);
+    if (engine) {
+      syncActiveEditingDraftToEngine(engine);
+      engine.flushPendingTextScroll();
+    }
     persistPendingRef.current = true;
     if (persistTimerRef.current != null) {
       window.clearTimeout(persistTimerRef.current);

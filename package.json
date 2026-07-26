@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:engine": "node --experimental-strip-types --test src/engine/*.test.ts",
     "test:codex": "node --experimental-strip-types --test src/codex/*.test.ts src/claudeCode/*.test.ts test/codex-process-manager.test.cjs test/claude-code-process-manager.test.cjs",
     "test:legacy-history": "node --experimental-strip-types --test src/codex/legacyHistory.test.ts",
     "test:context": "node --test test/conversation-context-storage.test.cjs",
