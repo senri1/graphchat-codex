@@ -6,6 +6,12 @@ import { rasterizeHtmlToImage, type TextHitZone } from './raster/textRaster';
 import { renderMarkdownMath, renderMarkdownMathInline } from '../markdown/renderMarkdownMath';
 import { normalizeMathDelimitersFromCopyTex } from '../markdown/mathDelimiters';
 import { TextLod2Overlay, type HighlightRect, type TextLod2Action, type TextLod2Mode } from './TextLod2Overlay';
+import {
+  TEXT_HOVER_HANDOFF_MAX_MS,
+  TextHoverHandoff,
+  isLargeTextNodeRender,
+  type TextHoverHandoffState,
+} from './TextHoverHandoff';
 import { PdfTextLod2Overlay, type HighlightRect as PdfHighlightRect, type PdfSelectionStartAnchor } from './PdfTextLod2Overlay';
 import { WebGLPreblur } from './WebGLPreblur';
 import {
@@ -778,8 +784,34 @@ export class WorldEngine {
   private textLod2: TextLod2Overlay | null = null;
   private textLod2Target: { nodeId: string; mode: TextLod2Mode } | null = null;
   private textResizeHold: { nodeId: string; sig: string; expiresAt: number } | null = null;
+  private lastHoverPointerMoveAt = 0;
+  private readonly textHoverHandoff = new TextHoverHandoff({
+    onStateChange: (state) => {
+      if (state?.phase === 'handoff') {
+        if (state.requiresRasterHandoff) this.startTextHoverHandoffRaster(state);
+        else {
+          this.textHoverHandoff.cancel();
+          return;
+        }
+      }
+      this.requestRender();
+    },
+    canStartHandoff: (deadline) => {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      const inputHasSettled = now - this.lastHoverPointerMoveAt >= 120;
+      return inputHasSettled && (deadline.didTimeout || deadline.timeRemaining() >= 6);
+    },
+    onExpire: (record) => {
+      if (record.requiresRasterHandoff) {
+        this.textRasterRetryAfterBySig.set(record.rasterSig, performance.now() + 1200);
+      }
+    },
+  });
   private textLod2HtmlCache: { nodeId: string; displayHash: string; html: string } | null = null;
-  private textLod2HitZones: { nodeId: string; displayHash: string; zones: TextHitZone[] } | null = null;
+  private readonly largeTextNodeRenderByNodeId = new Map<
+    string,
+    { displayHash: string; large: boolean; htmlMeasured: boolean }
+  >();
   private textStreamLod2: TextLod2Overlay | null = null;
   private textStreamLod2Target: { nodeId: string; mode: TextLod2Mode } | null = null;
   private textStreamLod2HtmlCache: { nodeId: string; displayHash: string; html: string } | null = null;
@@ -835,6 +867,8 @@ export class WorldEngine {
   private lastTapNodeId: string | null = null;
 
   private readonly textRasterQueueByNodeId = new Map<string, TextRasterJob>();
+  private readonly textRasterInFlightKeys = new Set<string>();
+  private readonly textRasterRetryAfterBySig = new Map<string, number>();
   private textRasterRunning = false;
   private textRasterGeneration = 0;
 
@@ -1147,7 +1181,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         this.requestPersist();
       },
       onInteractingChange: (v) => {
-        if (v) this.suspendRasterQueueWorkForInteraction();
+        if (v) {
+          this.textHoverHandoff.cancel();
+          this.suspendRasterQueueWorkForInteraction();
+        }
         this.interacting = v;
         this.requestRender();
         if (!this.isRasterWorkSuspended()) this.kickRasterQueuesAfterViewportUpdate();
@@ -1289,6 +1326,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
   loadChatState(next: WorldEngineChatState): void {
     // Tear down any active interactions/overlays first to avoid dangling DOM selection.
+    this.textHoverHandoff.cancel();
     this.editingNodeId = null;
     this.editingOriginalContent = null;
     this.selectedNodeId = null;
@@ -1298,6 +1336,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.lastInkPrefaceRasterKeyByNodeId.clear();
     this.textLod2HtmlCache = null;
     this.textStreamLod2HtmlCache = null;
+    this.largeTextNodeRenderByNodeId.clear();
     this.hoverTextNodeId = null;
     this.hoverPdfPage = null;
     this.textLod2Target = null;
@@ -1308,7 +1347,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.clearPdfTextSelection({ suppressOverlayCallback: true });
     try {
       this.textLod2?.hide();
+      this.textLod2?.discardRenderedContent();
       this.textStreamLod2?.hide();
+      this.textStreamLod2?.discardRenderedContent();
       this.pdfTextLod2?.hide();
     } catch {
       // ignore
@@ -1321,6 +1362,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     this.clearEdgeRouteCache();
     this.textRasterGeneration += 1;
     this.textRasterQueueByNodeId.clear();
+    this.textRasterRetryAfterBySig.clear();
     this.fullTextNodeRasterGeneration += 1;
     this.fullTextNodeRasterQueueByNodeId.clear();
     // Keep full-node rasters across chat switches to avoid cold-start jank when revisiting chats.
@@ -1738,6 +1780,20 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   clearStressNodes(): void {
+    this.textHoverHandoff.cancel();
+    this.textRasterRetryAfterBySig.clear();
+    try {
+      this.textLod2?.hide();
+      this.textLod2?.discardRenderedContent();
+      this.textStreamLod2?.hide();
+      this.textStreamLod2?.discardRenderedContent();
+    } catch {
+      // ignore
+    }
+    this.textResizeHold = null;
+    this.textLod2HtmlCache = null;
+    this.textStreamLod2HtmlCache = null;
+    this.largeTextNodeRenderByNodeId.clear();
     this.clearSelection();
     for (const node of this.nodes) {
       if (node.kind === 'pdf') this.disposePdfNode(node.id);
@@ -2163,6 +2219,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const next: Tool = tool === 'draw' ? 'draw' : tool === 'erase' ? 'erase' : 'select';
     if (this.tool === next) return;
     this.tool = next;
+    if (next !== 'select') {
+      this.textHoverHandoff.cancel();
+      this.hoverTextNodeId = null;
+    }
     this.requestRender();
     this.emitUiState();
   }
@@ -2247,6 +2307,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const next = typeof nodeId === 'string' ? nodeId : null;
     if (this.rawViewerNodeId === next) return;
     this.rawViewerNodeId = next;
+    if (next && this.textHoverHandoff.getState()?.nodeId === next) this.textHoverHandoff.cancel();
 
     // Close any text selection / menus on the node being covered.
     if (next && this.textSelectNodeId === next) this.clearTextSelection({ suppressOverlayCallback: true });
@@ -2387,12 +2448,13 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private invalidateNodeTextRendering(): void {
+    this.textHoverHandoff.cancel();
     this.textRasterGeneration += 1;
     this.textRasterQueueByNodeId.clear();
+    this.textRasterRetryAfterBySig.clear();
     this.clearTextRasters();
     this.invalidateFullTextNodeRasters({ requestRender: false });
     this.textResizeHold = null;
-    this.textLod2HitZones = null;
     try {
       const style = this.nodeTextStyle();
       this.textLod2?.setBaseTextStyle(style);
@@ -3479,6 +3541,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   private enqueueTextRaster(job: TextRasterJob): void {
     if (!job.nodeId || !job.key) return;
     if (this.textRasterCache.has(job.key)) return;
+    if (this.textRasterInFlightKeys.has(job.key)) return;
     const prev = this.textRasterQueueByNodeId.get(job.nodeId);
     if (prev && prev.key === job.key) return;
     this.textRasterQueueByNodeId.set(job.nodeId, job);
@@ -3585,13 +3648,24 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         if (this.isRasterWorkSuspended()) return;
         if (this.textRasterGeneration !== gen) return;
 
-        const next = this.textRasterQueueByNodeId.entries().next();
-        if (next.done) return;
-        const [nodeId, job] = next.value;
+        const handoff = this.textHoverHandoff.getState();
+        const priorityNodeId = handoff?.phase === 'handoff' ? handoff.nodeId : null;
+        const priorityJob = priorityNodeId ? this.textRasterQueueByNodeId.get(priorityNodeId) : null;
+        let nodeId: string;
+        let job: TextRasterJob;
+        if (priorityJob && priorityNodeId) {
+          nodeId = priorityNodeId;
+          job = priorityJob;
+        } else {
+          const next = this.textRasterQueueByNodeId.entries().next();
+          if (next.done) return;
+          [nodeId, job] = next.value;
+        }
         this.textRasterQueueByNodeId.delete(nodeId);
 
 	        if (this.textRasterCache.has(job.key)) continue;
 
+        this.textRasterInFlightKeys.add(job.key);
 	        try {
             const stillWanted = (() => {
               const node = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === job.nodeId) ?? null;
@@ -3653,11 +3727,32 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           if (!prevBest || job.rasterScale >= prevBest.rasterScale) {
             this.bestTextRasterKeyBySig.set(job.sig, { key: job.key, rasterScale: job.rasterScale });
           }
+          this.textRasterRetryAfterBySig.delete(job.sig);
 
           this.evictOldTextRasters();
-          this.requestRender();
+          const activeHandoff = this.textHoverHandoff.getState();
+          if (
+            activeHandoff?.phase === 'handoff' &&
+            activeHandoff.nodeId === job.nodeId &&
+            activeHandoff.rasterSig === job.sig
+          ) {
+            this.textHoverHandoff.cancel();
+          } else {
+            this.requestRender();
+          }
         } catch {
-          // ignore; leave missing (LOD0 will display)
+          this.textRasterRetryAfterBySig.set(job.sig, performance.now() + 1500);
+          const activeHandoff = this.textHoverHandoff.getState();
+          if (
+            activeHandoff?.phase === 'handoff' &&
+            activeHandoff.nodeId === job.nodeId &&
+            activeHandoff.rasterSig === job.sig
+          ) {
+            this.textHoverHandoff.cancel();
+          }
+          // Leave other missing rasters on the normal LOD0 fallback.
+        } finally {
+          this.textRasterInFlightKeys.delete(job.key);
         }
 
         // Yield between rasterizations to keep the UI responsive.
@@ -4014,6 +4109,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       // ignore
     }
 
+    this.textHoverHandoff.cancel();
     this.input.dispose();
     this.clearTextSelection({ suppressOverlayCallback: true });
     this.clearPdfTextSelection({ suppressOverlayCallback: true });
@@ -4085,6 +4181,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const t = ev.pointerType || 'mouse';
     if (t !== 'mouse') return;
     if ((ev.buttons ?? 0) !== 0) return;
+    this.lastHoverPointerMoveAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
 
     const rect = this.canvas.getBoundingClientRect();
     const p: Vec2 = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
@@ -4093,6 +4190,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     const pdfAnn = this.pdfAnnotationPlacement;
     if (pdfAnn) {
+      this.textHoverHandoff.cancel();
       this.setCanvasCursor('crosshair');
       const hadHover = this.hoverTextNodeId !== null || this.hoverPdfPage !== null || this.hoverNodeHeaderButton !== null;
       if (hadHover) {
@@ -4111,6 +4209,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     const textAnn = this.textAnnotationPlacement;
     if (textAnn) {
+      this.textHoverHandoff.cancel();
       this.setCanvasCursor('crosshair');
       const hadHover = this.hoverTextNodeId !== null || this.hoverPdfPage !== null || this.hoverNodeHeaderButton !== null;
       if (hadHover) {
@@ -4128,6 +4227,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     }
 
     if (this.pendingSpawnByDraw) {
+      this.textHoverHandoff.cancel();
       const hadHover = this.hoverTextNodeId !== null || this.hoverPdfPage !== null || this.hoverNodeHeaderButton !== null;
       this.setCanvasCursor('crosshair');
       if (hadHover) {
@@ -4265,9 +4365,18 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       nextPdfHover?.nodeId !== this.hoverPdfPage?.nodeId ||
       nextPdfHover?.token !== this.hoverPdfPage?.token;
     if (changed) {
+      const previousTextHover = this.hoverTextNodeId;
       this.hoverTextNodeId = nextTextHover;
       this.hoverPdfPage = nextPdfHover;
       this.hoverNodeHeaderButton = nextHeaderHover;
+      if (nextTextHover !== previousTextHover) {
+        if (nextTextHover) {
+          this.textLod2?.restorePointerInteraction(nextTextHover);
+          this.textHoverHandoff.cancel();
+        } else if (previousTextHover) {
+          this.beginTextHoverHandoff(previousTextHover);
+        }
+      }
       this.requestRender();
     }
   };
@@ -4383,6 +4492,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     if (this.canvas.height !== pxH) this.canvas.height = pxH;
 
     if (changed) {
+      this.textHoverHandoff.cancel();
       this.backgroundCache = null;
       this.requestRender();
       this.emitDebug({ force: true });
@@ -5049,6 +5159,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const node = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === nodeId) ?? null;
     if (!node) return false;
     if (!this.canEditTextNode(node)) return false;
+    if (this.textHoverHandoff.getState()?.nodeId === nodeId) this.textHoverHandoff.cancel();
 
     const prevEditingId = this.editingNodeId;
     if (prevEditingId && prevEditingId !== nodeId) {
@@ -5430,6 +5541,15 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     if (idx < 0) return;
 
     const node = this.nodes[idx];
+    if (this.textHoverHandoff.getState()?.nodeId === id) this.textHoverHandoff.cancel();
+    if (this.textLod2?.getNodeId() === id) this.textLod2.hide();
+    if (this.textStreamLod2?.getNodeId() === id) this.textStreamLod2.hide();
+    this.textLod2?.discardRenderedContent(id);
+    this.textStreamLod2?.discardRenderedContent(id);
+    if (this.textResizeHold?.nodeId === id) this.textResizeHold = null;
+    if (this.textLod2HtmlCache?.nodeId === id) this.textLod2HtmlCache = null;
+    if (this.textStreamLod2HtmlCache?.nodeId === id) this.textStreamLod2HtmlCache = null;
+    this.largeTextNodeRenderByNodeId.delete(id);
 
     if (node.kind === 'text' && node.isGenerating) {
       try {
@@ -5759,7 +5879,124 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     return { sig, scrollX, scrollY };
   }
 
+  private isLargeTextNodeForRaster(node: TextNode): boolean {
+    const mainHtmlMatches =
+      this.textLod2HtmlCache?.nodeId === node.id && this.textLod2HtmlCache.displayHash === node.displayHash;
+    const streamHtmlMatches =
+      this.textStreamLod2HtmlCache?.nodeId === node.id && this.textStreamLod2HtmlCache.displayHash === node.displayHash;
+    const cachedHtmlChars = Math.max(
+      mainHtmlMatches ? this.textLod2HtmlCache!.html.length : 0,
+      streamHtmlMatches ? this.textStreamLod2HtmlCache!.html.length : 0,
+    );
+    const htmlMeasured = mainHtmlMatches || streamHtmlMatches;
+    const previous = this.largeTextNodeRenderByNodeId.get(node.id);
+    if (
+      previous?.displayHash === node.displayHash &&
+      (previous.large || previous.htmlMeasured || !htmlMeasured)
+    ) {
+      return previous.large;
+    }
+    const serializedChars = (value: unknown): number => {
+      if (value == null) return 0;
+      try {
+        return JSON.stringify(value)?.length ?? 0;
+      } catch {
+        return 0;
+      }
+    };
+    const sourceChars =
+      node.content.length +
+      (node.userPreface?.replyTo?.length ?? 0) +
+      (node.userPreface?.contexts ?? []).reduce((sum, value) => sum + value.length, 0) +
+      serializedChars(node.codexTimeline) +
+      serializedChars(node.codexEvents) +
+      serializedChars(node.thinkingSummary) +
+      serializedChars(node.canonicalMessage);
+    const structuralRows =
+      (node.codexTimeline?.length ?? 0) +
+      (node.thinkingSummary?.length ?? 0) +
+      (node.userPreface?.contexts?.length ?? 0) +
+      (node.attachments?.length ?? 0);
+    const large = isLargeTextNodeRender({
+      sourceChars,
+      renderedHtmlChars: cachedHtmlChars,
+      structuralRows,
+      areaPx: Math.max(0, node.rect.w) * Math.max(0, node.rect.h),
+    });
+    this.largeTextNodeRenderByNodeId.set(node.id, { displayHash: node.displayHash, large, htmlMeasured });
+    return large;
+  }
+
+  private beginTextHoverHandoff(nodeId: string): void {
+    const node = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === nodeId) ?? null;
+    if (!node || this.textLod2?.getNodeId() !== nodeId) {
+      this.textHoverHandoff.cancel();
+      return;
+    }
+    this.textLod2.parkPointerInteraction(nodeId);
+    const contentRect = this.textContentRect(node.rect);
+    const rasterSig = this.textRasterSigForNode(node, contentRect).sig;
+    this.textHoverHandoff.begin({
+      nodeId,
+      displayHash: node.displayHash,
+      rasterSig,
+      expiresAt: performance.now() + TEXT_HOVER_HANDOFF_MAX_MS,
+      requiresRasterHandoff: this.isLargeTextNodeForRaster(node),
+    });
+  }
+
+  private startTextHoverHandoffRaster(state: TextHoverHandoffState): void {
+    const current = this.textHoverHandoff.getState();
+    if (
+      !current ||
+      current.phase !== 'handoff' ||
+      current.nodeId !== state.nodeId ||
+      current.displayHash !== state.displayHash ||
+      current.rasterSig !== state.rasterSig
+    ) {
+      return;
+    }
+    if (performance.now() > current.expiresAt || this.isRasterWorkSuspended()) return;
+
+    const node = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === current.nodeId) ?? null;
+    if (!node || node.displayHash !== current.displayHash || node.id === this.editingNodeId || node.isGenerating) return;
+    const contentRect = this.textContentRect(node.rect);
+    const { sig, scrollX, scrollY } = this.textRasterSigForNode(node, contentRect);
+    if (sig !== current.rasterSig || this.getBestTextRaster(sig)) return;
+    const retryAfter = this.textRasterRetryAfterBySig.get(sig) ?? 0;
+    if (retryAfter > performance.now()) {
+      this.textHoverHandoff.cancel();
+      return;
+    }
+    if (retryAfter > 0) this.textRasterRetryAfterBySig.delete(sig);
+
+    const rasterScale = this.chooseTextRasterScale();
+    const key = `${sig}|s${rasterScale}`;
+    if (this.textRasterCache.has(key)) {
+      this.bestTextRasterKeyBySig.set(sig, { key, rasterScale });
+      return;
+    }
+    const cached = this.textLod2HtmlCache;
+    const html =
+      cached && cached.nodeId === node.id && cached.displayHash === node.displayHash
+        ? cached.html
+        : this.renderTextNodeHtml(node);
+    this.enqueueTextRaster({
+      nodeId: node.id,
+      key,
+      sig,
+      rasterScale,
+      width: contentRect.w,
+      height: contentRect.h,
+      html,
+      scrollX,
+      scrollY,
+    });
+    this.kickTextRasterQueue();
+  }
+
   private isTextNodeEligibleForFullRaster(node: TextNode): boolean {
+    if (this.isLargeTextNodeForRaster(node)) return false;
     if (node.id === this.editingNodeId) return false;
     if (node.id === this.selectedNodeId) return false;
     if (node.id === this.rawViewerNodeId) return false;
@@ -7168,97 +7405,16 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     return { sig, html, prefaceRect, inkRect };
   }
 
-  private updateTextLod2HitZonesFromOverlay(nodeId: string, displayHash: string, overlay: TextLod2Overlay): void {
-    try {
-      const z = Math.max(0.001, overlay.getZoom() || 1);
-      const contentEl = overlay.getContentElement();
-      const base = contentEl.getBoundingClientRect();
-      const zones: TextHitZone[] = [];
-
-      const sum = contentEl.querySelector('[data-gcv1-summary-toggle]') as HTMLElement | null;
-      if (sum) {
-        const r = sum.getBoundingClientRect();
-        zones.push({
-          kind: 'summary_toggle',
-          left: (r.left - base.left) / z,
-          top: (r.top - base.top) / z,
-          width: r.width / z,
-          height: r.height / z,
-        });
-      }
-
-      const chunkBtns = Array.from(contentEl.querySelectorAll('[data-gcv1-summary-chunk-toggle]')) as HTMLElement[];
-      for (const el of chunkBtns) {
-        const raw = el.getAttribute('data-gcv1-summary-chunk-toggle') ?? '';
-        const idx = Number(raw);
-        if (!Number.isFinite(idx)) continue;
-        const r = el.getBoundingClientRect();
-        zones.push({
-          kind: 'summary_chunk_toggle',
-          summaryIndex: idx,
-          left: (r.left - base.left) / z,
-          top: (r.top - base.top) / z,
-          width: r.width / z,
-          height: r.height / z,
-        });
-      }
-
-      const codexEvents = Array.from(contentEl.querySelectorAll('[data-gcv1-codex-event-toggle]')) as HTMLElement[];
-      for (const el of codexEvents) {
-        const eventId = (el.getAttribute('data-gcv1-codex-event-toggle') ?? '').trim();
-        if (!eventId) continue;
-        const r = el.getBoundingClientRect();
-        zones.push({
-          kind: 'codex_event_toggle',
-          eventId,
-          left: (r.left - base.left) / z,
-          top: (r.top - base.top) / z,
-          width: r.width / z,
-          height: r.height / z,
-        });
-      }
-
-      const contextBtns = Array.from(
-        contentEl.querySelectorAll('[data-gcv1-preface-context-toggle]'),
-      ) as HTMLElement[];
-      for (const el of contextBtns) {
-        const raw = el.getAttribute('data-gcv1-preface-context-toggle') ?? '';
-        const idx = Number(raw);
-        if (!Number.isFinite(idx)) continue;
-        const r = el.getBoundingClientRect();
-        zones.push({
-          kind: 'preface_context_toggle',
-          contextIndex: idx,
-          left: (r.left - base.left) / z,
-          top: (r.top - base.top) / z,
-          width: r.width / z,
-          height: r.height / z,
-        });
-      }
-
-      this.textLod2HitZones = { nodeId, displayHash, zones };
-    } catch {
-      this.textLod2HitZones = null;
-    }
-  }
-
   private getTextNodeHitZoneAtWorld(node: TextNode, world: Vec2): TextHitZone | null {
     const contentRect = this.textContentRect(node.rect);
     const localX = world.x - contentRect.x;
     const localY = world.y - contentRect.y;
     if (localX < 0 || localY < 0 || localX > contentRect.w || localY > contentRect.h) return null;
 
-    // Prefer DOM overlay hit zones if the overlay is currently showing this node.
-    const overlayZones =
-      this.textLod2Target?.nodeId === node.id &&
-      this.textLod2 &&
-      this.textLod2HitZones &&
-      this.textLod2HitZones.nodeId === node.id &&
-      this.textLod2HitZones.displayHash === node.displayHash
-        ? this.textLod2HitZones.zones
-        : null;
-
-    const zones = overlayZones ?? (() => {
+    // The live DOM handles its own interactive controls. Canvas hit-testing uses
+    // zones measured as part of the deferred content raster instead of forcing a
+    // synchronous DOM layout on the first hover frame.
+    const zones = (() => {
       const sig = this.textRasterSigForNode(node, contentRect).sig;
       const best = this.getBestTextRaster(sig);
       return best?.hitZones ?? null;
@@ -7312,6 +7468,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     if (!host) return null;
     const overlay = new TextLod2Overlay({
       host,
+      keepLayoutWarm: true,
       textStyle: this.nodeTextStyle(),
       onRequestCloseSelection: () => {
         this.clearTextSelection({ suppressOverlayCallback: true });
@@ -7527,6 +7684,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     client?: { x: number; y: number } | null;
     trigger?: { pointerId: number; pointerType: string } | null;
   }): void {
+    this.textHoverHandoff.cancel();
     this.cancelTextAnnotationPlacement();
 
     // During annotation placement, ensure the PDF LOD2 text overlay isn't intercepting pointermove;
@@ -7607,6 +7765,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     client?: { x: number; y: number } | null;
     trigger?: { pointerId: number; pointerType: string } | null;
   }): void {
+    this.textHoverHandoff.cancel();
     this.cancelPdfAnnotationPlacement();
 
     // During annotation placement, ensure LOD2 DOM overlays aren't intercepting pointermove;
@@ -7945,11 +8104,13 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const editingId = this.editingNodeId;
     const rawId = this.rawViewerNodeId;
     if (this.pdfAnnotationPlacement || this.textAnnotationPlacement) {
+      this.textHoverHandoff.cancel();
       this.textResizeHold = null;
       return null;
     }
 
     const concreteTarget = (nodeId: string, mode: TextLod2Mode) => {
+      this.textHoverHandoff.cancel();
       if (this.textResizeHold && this.textResizeHold.nodeId !== nodeId) this.textResizeHold = null;
       return { nodeId, mode };
     };
@@ -8006,6 +8167,31 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       if (n.id === rawId) continue;
       if (!rectsIntersect(n.rect, view)) continue;
       return concreteTarget(n.id, 'select');
+    }
+
+    const hoverHandoff = this.textHoverHandoff.getState();
+    if (hoverHandoff) {
+      const now = performance.now();
+      const node =
+        this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === hoverHandoff.nodeId) ?? null;
+      const invalid =
+        !node ||
+        node.displayHash !== hoverHandoff.displayHash ||
+        node.id === rawId ||
+        node.id === editingId ||
+        now > hoverHandoff.expiresAt;
+      if (invalid) {
+        this.textHoverHandoff.cancel();
+      } else {
+        const sig = this.textRasterSigForNode(node, this.textContentRect(node.rect)).sig;
+        if (sig !== hoverHandoff.rasterSig) {
+          this.textHoverHandoff.cancel();
+        } else if (hoverHandoff.phase === 'handoff' && this.getBestTextRaster(sig)) {
+          this.textHoverHandoff.cancel();
+        } else {
+          return { nodeId: node.id, mode: 'resize' };
+        }
+      }
     }
 
     const hold = this.textResizeHold;
@@ -8077,20 +8263,17 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const overlay = this.textLod2;
     if (!target) {
       if (overlay) overlay.hide();
-      this.textLod2HitZones = null;
       return;
     }
 
     if (this.editingNodeId && target.nodeId === this.editingNodeId) {
       if (overlay) overlay.hide();
-      this.textLod2HitZones = null;
       return;
     }
 
     const node = this.nodes.find((n): n is TextNode => n.id === target.nodeId && n.kind === 'text');
     if (!node) {
       if (overlay) overlay.hide();
-      this.textLod2HitZones = null;
       return;
     }
 
@@ -8148,7 +8331,6 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
         }
       }
     }
-    this.updateTextLod2HitZonesFromOverlay(node.id, node.displayHash, lod2);
   }
 
   private renderTextStreamLod2Target(target: { nodeId: string; mode: TextLod2Mode } | null): void {
@@ -8801,6 +8983,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     const view = this.worldViewportRect({ overscan: 320 });
     const desiredScale = this.chooseTextRasterScale();
     const desiredNodeIds = new Set<string>();
+    const hoverHandoff = this.textHoverHandoff.getState();
 
     for (const n of this.nodes) {
       if (n.kind !== 'text') continue;
@@ -8808,9 +8991,20 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       if (n.isGenerating) continue;
       if (this.isTextNodeEligibleForFullRaster(n)) continue;
       if (!rectsIntersect(n.rect, view)) continue;
+      if (hoverHandoff?.nodeId === n.id && hoverHandoff.phase === 'grace') continue;
+      if (
+        this.textLod2Target?.nodeId === n.id &&
+        this.textLod2Target.mode === 'select' &&
+        hoverHandoff?.phase !== 'handoff'
+      ) {
+        continue;
+      }
 
       const contentRect = this.textContentRect(n.rect);
       const { sig, scrollX, scrollY } = this.textRasterSigForNode(n, contentRect);
+      const retryAfter = this.textRasterRetryAfterBySig.get(sig) ?? 0;
+      if (retryAfter > performance.now()) continue;
+      if (retryAfter > 0) this.textRasterRetryAfterBySig.delete(sig);
       const best = this.bestTextRasterKeyBySig.get(sig);
       const hasBest = !!best && this.textRasterCache.has(best.key);
       if (hasBest && best!.rasterScale >= desiredScale) continue;

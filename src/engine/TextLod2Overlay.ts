@@ -279,6 +279,7 @@ export class TextLod2Overlay {
   private readonly content: HTMLDivElement;
   private readonly highlights: HTMLDivElement;
   private readonly highlightEls: HTMLDivElement[] = [];
+  private readonly keepLayoutWarm: boolean;
 
   private readonly menu: HTMLDivElement;
   private readonly menuCopyBtn: HTMLButtonElement;
@@ -289,7 +290,8 @@ export class TextLod2Overlay {
 
   private visibleNodeId: string | null = null;
   private mode: TextLod2Mode | null = null;
-  private contentHash: string | null = null;
+  private renderedNodeId: string | null = null;
+  private renderedContentHash: string | null = null;
   private lastZoom = 1;
   private menuText: string | null = null;
   private menuRange: Range | null = null;
@@ -749,9 +751,11 @@ export class TextLod2Overlay {
       trigger?: AnnotatePointerTrigger | null,
     ) => void;
     zIndex?: number;
+    keepLayoutWarm?: boolean;
     textStyle?: { fontFamily?: string; fontSizePx?: number; lineHeight?: number; color?: string };
   }) {
     this.host = opts.host;
+    this.keepLayoutWarm = Boolean(opts.keepLayoutWarm);
     this.onRequestCloseSelection = opts.onRequestCloseSelection;
     this.onRequestAction = opts.onRequestAction;
     this.onRequestSelect = opts.onRequestSelect;
@@ -783,7 +787,8 @@ export class TextLod2Overlay {
 
     const root = document.createElement('div');
     root.className = 'gc-textLod2';
-    root.style.display = 'none';
+    root.style.display = this.keepLayoutWarm ? 'block' : 'none';
+    root.style.visibility = 'hidden';
     root.style.position = 'absolute';
     root.style.left = '0';
     root.style.top = '0';
@@ -1084,6 +1089,28 @@ export class TextLod2Overlay {
     return this.scrollSession.flush();
   }
 
+  parkPointerInteraction(nodeId: string): boolean {
+    if (!nodeId || this.visibleNodeId !== nodeId) return false;
+    this.interactive = false;
+    this.root.classList.remove('gc-textLod2--interactive');
+    this.root.style.pointerEvents = 'none';
+    this.content.style.userSelect = 'none';
+    (this.content.style as any).webkitUserSelect = 'none';
+    this.content.style.cursor = 'default';
+    return true;
+  }
+
+  restorePointerInteraction(nodeId: string): boolean {
+    if (!nodeId || this.visibleNodeId !== nodeId) return false;
+    this.interactive = true;
+    this.root.classList.add('gc-textLod2--interactive');
+    this.root.style.pointerEvents = 'auto';
+    this.content.style.userSelect = 'text';
+    (this.content.style as any).webkitUserSelect = 'text';
+    this.content.style.cursor = 'text';
+    return true;
+  }
+
   withPointerEventsEnabled<T>(fn: () => T): T {
     const prev = this.root.style.pointerEvents;
     try {
@@ -1116,9 +1143,9 @@ export class TextLod2Overlay {
     scrollLeft?: number;
   }): void {
     const prevNodeId = this.visibleNodeId;
-    const prevHash = this.contentHash;
     const nodeChanged = prevNodeId !== opts.nodeId;
-    const hashChanged = prevHash !== opts.contentHash;
+    const contentChanged =
+      this.renderedNodeId !== opts.nodeId || this.renderedContentHash !== opts.contentHash;
 
     if (nodeChanged) {
       this.scrollSession.flush();
@@ -1134,6 +1161,7 @@ export class TextLod2Overlay {
     this.lastZoom = z;
 
     this.root.style.display = 'block';
+    this.root.style.visibility = 'visible';
     this.root.style.pointerEvents = this.interactive ? 'auto' : 'none';
     this.root.style.left = `${Math.round(opts.screenRect.x)}px`;
     this.root.style.top = `${Math.round(opts.screenRect.y)}px`;
@@ -1146,8 +1174,9 @@ export class TextLod2Overlay {
     this.scaled.style.height = `${worldH}px`;
     this.scaled.style.transform = `scale(${z})`;
 
-    if (hashChanged) {
-      this.contentHash = opts.contentHash;
+    if (contentChanged) {
+      this.renderedNodeId = opts.nodeId;
+      this.renderedContentHash = opts.contentHash;
       this.content.innerHTML = opts.html;
     }
 
@@ -1202,7 +1231,6 @@ export class TextLod2Overlay {
     this.programmaticScrollTarget = null;
     this.visibleNodeId = null;
     this.mode = null;
-    this.contentHash = null;
     this.interactive = false;
     this.root.classList.remove('gc-textLod2--interactive');
     this.nativePointerId = null;
@@ -1214,7 +1242,24 @@ export class TextLod2Overlay {
     }
     this.clearHighlights();
     this.closeMenu({ suppressCallback: true });
+    this.root.style.visibility = 'hidden';
+    this.root.style.display = this.keepLayoutWarm ? 'block' : 'none';
+  }
+
+  discardRenderedContent(nodeId?: string): void {
+    if (nodeId && this.renderedNodeId !== nodeId) return;
+    this.renderedNodeId = null;
+    this.renderedContentHash = null;
     this.root.style.display = 'none';
+    try {
+      this.content.replaceChildren();
+      this.content.scrollTop = 0;
+      this.content.scrollLeft = 0;
+    } catch {
+      this.content.innerHTML = '';
+    } finally {
+      this.root.style.display = this.visibleNodeId || this.keepLayoutWarm ? 'block' : 'none';
+    }
   }
 
   clearHighlights(): void {
