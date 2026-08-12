@@ -94,6 +94,25 @@ test('re-entry cancellation prevents a pending handoff', () => {
   assert.deepEqual(phases, ['grace', null]);
 });
 
+test('cancellation during grace prevents viewport input from starting raster handoff', () => {
+  const fake = createScheduler();
+  const phases: Array<string | null> = [];
+  const session = new TextHoverHandoff(
+    { onStateChange: (state) => phases.push(state?.phase ?? null) },
+    { scheduler: fake.scheduler },
+  );
+
+  session.begin(record);
+  assert.equal(session.cancel(), true);
+  assert.equal(fake.timerCount(), 0);
+  assert.equal(fake.idleCount(), 0);
+
+  fake.runTimers(180);
+  fake.runIdle();
+  assert.equal(session.getState(), null);
+  assert.deepEqual(phases, ['grace', null]);
+});
+
 test('a newer exit supersedes older scheduled callbacks', () => {
   const fake = createScheduler();
   const session = new TextHoverHandoff(

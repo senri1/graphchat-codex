@@ -95,6 +95,35 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+function abortError(): Error {
+  const error = new Error('Text rasterization aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw abortError();
+}
+
+async function waitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
+  return await new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
 async function waitForImages(container: HTMLElement, timeoutMs: number): Promise<void> {
   const imgs = Array.from(container.querySelectorAll('img'));
   if (imgs.length === 0) return;
@@ -279,7 +308,11 @@ async function getKaTeXFontFacesCssForSvg(rawFontFacesCss: string): Promise<stri
   return out;
 }
 
-async function svgToImage(blob: Blob, opts?: { postDecodeWait?: boolean; postDecodeWaitMs?: number }): Promise<CanvasImageSource> {
+async function svgToImage(
+  blob: Blob,
+  opts?: { postDecodeWait?: boolean; postDecodeWaitMs?: number; signal?: AbortSignal },
+): Promise<CanvasImageSource> {
+  throwIfAborted(opts?.signal);
   const url = URL.createObjectURL(blob);
   const img = new Image();
   img.decoding = 'async';
@@ -290,22 +323,28 @@ async function svgToImage(blob: Blob, opts?: { postDecodeWait?: boolean; postDec
 
   try {
     if (typeof (img as any).decode === 'function') {
-      await (img as any).decode();
+      await waitWithAbort((img as any).decode(), opts?.signal);
     } else {
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = (e) => reject(e);
-      });
+      await waitWithAbort(
+        new Promise<void>((resolve, reject) => {
+          img.onload = () => resolve();
+          img.onerror = (e) => reject(e);
+        }),
+        opts?.signal,
+      );
     }
 
     if (postDecodeWait && postDecodeWaitMs > 0) {
       try {
-        await Promise.race([
-          nextFrame(),
-          new Promise<void>((resolve) => window.setTimeout(resolve, postDecodeWaitMs)),
-        ]);
+        await waitWithAbort(
+          Promise.race([
+            nextFrame(),
+            new Promise<void>((resolve) => window.setTimeout(resolve, postDecodeWaitMs)),
+          ]),
+          opts?.signal,
+        );
       } catch {
-        // ignore
+        throwIfAborted(opts?.signal);
       }
     }
   } finally {
@@ -316,10 +355,12 @@ async function svgToImage(blob: Blob, opts?: { postDecodeWait?: boolean; postDec
     }
   }
 
+  throwIfAborted(opts?.signal);
   if (typeof createImageBitmap === 'function') {
     try {
-      return await createImageBitmap(img);
+      return await waitWithAbort(createImageBitmap(img), opts?.signal);
     } catch {
+      throwIfAborted(opts?.signal);
       // ignore
     }
   }
@@ -426,6 +467,7 @@ export async function rasterizeHtmlToImage(
     scrollX?: number;
     scrollY?: number;
     scrollGutterPx?: number;
+    signal?: AbortSignal;
   },
 ): Promise<TextRasterResult> {
   if (typeof document === 'undefined') {
@@ -438,11 +480,13 @@ export async function rasterizeHtmlToImage(
   const pixelW = Math.max(1, Math.ceil(width * rasterScale));
   const pixelH = Math.max(1, Math.ceil(height * rasterScale));
 
+  throwIfAborted(opts.signal);
   const root = ensureMeasureRoot();
   root.innerHTML = '';
+  let card: HTMLDivElement | null = null;
 
   try {
-    const card = document.createElement('div');
+    card = document.createElement('div');
     card.className = 'mdx';
     card.style.width = `${width}px`;
     card.style.height = `${height}px`;
@@ -463,6 +507,7 @@ export async function rasterizeHtmlToImage(
     (card.style as any).wordWrap = 'break-word';
     card.innerHTML = html ?? '';
     root.appendChild(card);
+    throwIfAborted(opts.signal);
 
     const scrollX = (() => {
       const raw = Number(opts.scrollX);
@@ -501,14 +546,18 @@ export async function rasterizeHtmlToImage(
     }
 
     const hasImages = Boolean(card.querySelector('img'));
-    if (hasImages) await waitForImages(card, 450);
+    if (hasImages) await waitWithAbort(waitForImages(card, 450), opts.signal);
+    throwIfAborted(opts.signal);
 
     const hasKaTeX = Boolean(card.querySelector('.katex'));
     const katexCss = hasKaTeX ? getKaTeXCssParts() : { rules: '', fontFaces: '' };
     const fontCssRaw = hasKaTeX ? stripInvalidXmlChars(katexCss.fontFaces || '') : '';
-    const fontCss = hasKaTeX ? stripInvalidXmlChars(await getKaTeXFontFacesCssForSvg(fontCssRaw)) : '';
+    const fontCss = hasKaTeX
+      ? stripInvalidXmlChars(await waitWithAbort(getKaTeXFontFacesCssForSvg(fontCssRaw), opts.signal))
+      : '';
     const css = stripInvalidXmlChars([MDX_CSS, katexCss.rules].filter(Boolean).join('\n'));
 
+    throwIfAborted(opts.signal);
     const hitZones = measureHitZones(card);
 
     const cardXml = (() => {
@@ -518,6 +567,9 @@ export async function rasterizeHtmlToImage(
         return stripInvalidXmlChars(card.outerHTML);
       }
     })();
+    card.remove();
+    card = null;
+    throwIfAborted(opts.signal);
 
     const svg = [
       '<?xml version="1.0" encoding="UTF-8"?>',
@@ -539,11 +591,13 @@ export async function rasterizeHtmlToImage(
     const image = await svgToImage(svgBlob, {
       postDecodeWait: hasKaTeX || hasImages,
       postDecodeWaitMs: 32,
+      signal: opts.signal,
     });
 
+    throwIfAborted(opts.signal);
     return { image, pixelW, pixelH, bitmapBytesEstimate, hasKaTeX, hitZones };
   } finally {
-    root.innerHTML = '';
+    card?.remove();
   }
 }
 

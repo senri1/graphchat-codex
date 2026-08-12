@@ -9,6 +9,17 @@ export type CodexInjectedMessage = {
   }>;
 };
 
+export type OmittedFailedAssistantResponse = {
+  nodeId: string;
+  error: string;
+  modelId?: string;
+};
+
+export type LegacyHistoryProjection = {
+  messages: CodexInjectedMessage[];
+  omittedFailures: OmittedFailedAssistantResponse[];
+};
+
 function clean(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -67,6 +78,18 @@ export function isLegacyContinuationNode(
   );
 }
 
+export function isFailedAssistantHistoryNode(
+  node: ChatNode | null | undefined,
+): boolean {
+  return Boolean(
+    node?.kind === 'text' &&
+      node.author === 'assistant' &&
+      !node.isGenerating &&
+      clean(node.llmError) &&
+      !isStoppedAssistantResponse(node),
+  );
+}
+
 export function isClaudeCodeHistoryInjectionEndpoint(
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
@@ -78,7 +101,7 @@ export function isClaudeCodeHistoryInjectionEndpoint(
   );
 }
 
-export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexInjectedMessage[] {
+export function buildLegacyHistoryProjection(nodes: ChatNode[], endNodeId: string): LegacyHistoryProjection {
   const endId = clean(endNodeId);
   if (!endId) throw new Error('Legacy history endpoint is missing.');
 
@@ -97,29 +120,39 @@ export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexI
     currentId = clean(node.parentId) || null;
   }
 
-  const history: CodexInjectedMessage[] = [];
+  const messages: CodexInjectedMessage[] = [];
+  const omittedFailures: OmittedFailedAssistantResponse[] = [];
   for (const node of reversedPath.reverse()) {
     if (node.kind !== 'text') continue;
-    if (node.author === 'assistant' && node.llmError && !isStoppedAssistantResponse(node)) {
-      throw new Error('The selected imported branch contains a failed assistant response.');
+    if (isFailedAssistantHistoryNode(node)) {
+      omittedFailures.push({
+        nodeId: node.id,
+        error: clean(node.llmError),
+        ...(clean(node.modelId) ? { modelId: clean(node.modelId) } : {}),
+      });
+      continue;
     }
     const text = visibleTextForNode(node);
     if (!text) continue;
 
     const role = node.author;
     const contentType = role === 'user' ? 'input_text' : 'output_text';
-    const previous = history[history.length - 1];
+    const previous = messages[messages.length - 1];
     if (previous?.role === role) {
       previous.content[0].text = `${previous.content[0].text}\n\n${text}`;
       continue;
     }
 
-    history.push({
+    messages.push({
       type: 'message',
       role,
       content: [{ type: contentType, text }],
     });
   }
 
-  return history;
+  return { messages, omittedFailures };
+}
+
+export function buildLegacyHistory(nodes: ChatNode[], endNodeId: string): CodexInjectedMessage[] {
+  return buildLegacyHistoryProjection(nodes, endNodeId).messages;
 }

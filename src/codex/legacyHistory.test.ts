@@ -3,9 +3,11 @@ import test from 'node:test';
 import type { ChatNode } from '../model/chat';
 import {
   buildLegacyHistory,
+  buildLegacyHistoryProjection,
   hasUserPrefaceContext,
   isChainedUserTextHistoryNode,
   isClaudeCodeHistoryInjectionEndpoint,
+  isFailedAssistantHistoryNode,
   isLegacyContinuationNode,
 } from './legacyHistory.ts';
 
@@ -244,7 +246,50 @@ test('does not treat active, failed, or non-Claude responses as Claude history e
   assert.equal(isClaudeCodeHistoryInjectionEndpoint(codex), false);
 });
 
-test('does not allow incomplete, empty, or failed nodes as legacy continuation points', () => {
+test('omits hard-failed assistant responses without rejecting the selected branch', () => {
+  const failed = textNode({
+    id: 'a1',
+    parentId: 'u1',
+    author: 'assistant',
+    content: 'API Error: 529 Overloaded',
+    modelId: 'claude-code:claude-fable-5:max',
+  });
+  failed.llmError = 'API Error: 529 Overloaded';
+  const nodes = [
+    textNode({ id: 'u1', author: 'user', content: 'Original request' }),
+    failed,
+    textNode({ id: 'u2', parentId: 'a1', author: 'user', content: 'Try again' }),
+    textNode({ id: 'a2', parentId: 'u2', author: 'assistant', content: 'Recovered answer' }),
+  ];
+
+  const projection = buildLegacyHistoryProjection(nodes, 'a2');
+  assert.deepEqual(projection.messages, [
+    {
+      type: 'message',
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Original request\n\nTry again' }],
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'Recovered answer' }],
+    },
+  ]);
+  assert.deepEqual(projection.omittedFailures, [
+    {
+      nodeId: 'a1',
+      error: 'API Error: 529 Overloaded',
+      modelId: 'claude-code:claude-fable-5:max',
+    },
+  ]);
+  assert.deepEqual(buildLegacyHistory(nodes, 'a2'), projection.messages);
+  assert.equal(isFailedAssistantHistoryNode(failed), true);
+  assert.deepEqual(buildLegacyHistory(nodes, failed.id), [
+    { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Original request' }] },
+  ]);
+});
+
+test('does not allow incomplete, empty, or failed nodes as completed legacy continuation points', () => {
   const failed = textNode({
     id: 'a1',
     parentId: 'u1',
@@ -252,10 +297,6 @@ test('does not allow incomplete, empty, or failed nodes as legacy continuation p
     content: 'Error: unsupported model',
   });
   failed.llmError = 'unsupported model';
-  const nodes = [
-    textNode({ id: 'u1', author: 'user', content: 'Hello' }),
-    failed,
-  ];
   const empty = textNode({ id: 'u2', author: 'user', content: '  ' });
   const draft = textNode({ id: 'u3', author: 'user', content: 'Unsent draft' });
   draft.conversationDraft = true;
@@ -264,5 +305,4 @@ test('does not allow incomplete, empty, or failed nodes as legacy continuation p
   assert.equal(isLegacyContinuationNode(empty), false);
   assert.equal(isLegacyContinuationNode(draft), false);
   assert.equal(isChainedUserTextHistoryNode(draft), true);
-  assert.throws(() => buildLegacyHistory(nodes, failed.id), /failed assistant response/);
 });

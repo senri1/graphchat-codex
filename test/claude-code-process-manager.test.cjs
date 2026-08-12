@@ -255,6 +255,25 @@ test('Claude Code graph turns forward text deltas before message stop', async ()
   assert.equal(firstTextDelta < assistantMessage, true);
 });
 
+test('Claude Code preserves the provider error when a success subtype is marked as an error', async () => {
+  const providerError =
+    'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment.';
+  const { events } = await runFakeClaudeCodeTurn([
+    {
+      type: 'result',
+      session_id: 'session-1',
+      subtype: 'success',
+      is_error: true,
+      result: providerError,
+    },
+  ]);
+
+  const completion = events.find((event) => event.kind === 'turn-completed');
+  assert.equal(completion?.status, 'failed');
+  assert.equal(completion?.error, providerError);
+  assert.notEqual(completion?.error, 'Claude Code ended with success.');
+});
+
 test('Claude Code graph turns keep known tool-use stream text out of final deltas', async () => {
   const { events } = await runFakeClaudeCodeTurn([
     {

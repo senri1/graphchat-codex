@@ -1,4 +1,4 @@
-import { hypot2 } from './math';
+import { hypot2 } from './math.ts';
 import type { Vec2 } from './types';
 import type { Camera } from './Camera';
 
@@ -21,6 +21,8 @@ type PinchState = {
 export type InputControllerEvents = {
   onChange?: () => void;
   onInteractingChange?: (isInteracting: boolean) => void;
+  onViewportInteractionChange?: (isInteracting: boolean) => void;
+  onViewportMotionChange?: (isMoving: boolean) => void;
   onTap?: (p: Vec2, info: { pointerType: string; pointerId: number; wheelInput: WheelInputResolved }) => void;
   onPointerDown?: (p: Vec2, info: { pointerType: string; pointerId: number; button: number }) => PointerCaptureMode | null;
   onPointerMove?: (p: Vec2, info: { pointerType: string; pointerId: number }) => void;
@@ -66,6 +68,10 @@ export class InputController {
   private dragBegan = new Set<number>();
   private capturedPointers = new Map<number, PointerCaptureMode>();
   private isInteracting = false;
+  private isViewportInteracting = false;
+  private isViewportMoving = false;
+  private viewportPointerIds = new Set<number>();
+  private wheelViewportActive = false;
   private wheelIdleTimeout: number | null = null;
   private wheelInputPreference: WheelInputPreference = 'auto';
   private lastAutoWheelInput: WheelInputResolved = 'unknown';
@@ -106,6 +112,7 @@ export class InputController {
       this.pointers.delete(id);
       this.dragBegan.delete(id);
       this.capturedPointers.delete(id);
+      this.viewportPointerIds.delete(id);
       try {
         (this.el as any).releasePointerCapture?.(id);
       } catch { }
@@ -142,6 +149,7 @@ export class InputController {
 
     this.setInteracting(true);
     this.recomputePinchState();
+    this.recomputeViewportInteraction();
   }
 
   start(): void {
@@ -159,6 +167,9 @@ export class InputController {
     this.pointers.clear();
     this.pinch = null;
     this.capturedPointers.clear();
+    this.viewportPointerIds.clear();
+    this.wheelViewportActive = false;
+    this.recomputeViewportInteraction();
     this.el.removeEventListener('pointerdown', this.onPointerDown as any);
     this.el.removeEventListener('pointermove', this.onPointerMove as any);
     this.el.removeEventListener('pointerup', this.onPointerUp as any);
@@ -173,6 +184,23 @@ export class InputController {
     this.events.onInteractingChange?.(next);
   }
 
+  private recomputeViewportInteraction(): void {
+    const next = this.viewportPointerIds.size > 0 || this.wheelViewportActive || this.pinch != null;
+    if (this.isViewportInteracting === next) return;
+    if (!next && this.isViewportMoving) {
+      this.isViewportMoving = false;
+      this.events.onViewportMotionChange?.(false);
+    }
+    this.isViewportInteracting = next;
+    this.events.onViewportInteractionChange?.(next);
+  }
+
+  private beginViewportMotion(): void {
+    if (this.isViewportMoving) return;
+    this.isViewportMoving = true;
+    this.events.onViewportMotionChange?.(true);
+  }
+
   private clearWheelIdleTimer(): void {
     if (this.wheelIdleTimeout == null) return;
     try {
@@ -182,10 +210,14 @@ export class InputController {
   }
 
   private markWheelActivity(): void {
+    this.wheelViewportActive = true;
+    this.recomputeViewportInteraction();
     this.setInteracting(true);
     this.clearWheelIdleTimer();
     this.wheelIdleTimeout = window.setTimeout(() => {
       this.wheelIdleTimeout = null;
+      this.wheelViewportActive = false;
+      this.recomputeViewportInteraction();
       if (this.pointers.size === 0) this.setInteracting(false);
     }, 140);
   }
@@ -273,6 +305,11 @@ export class InputController {
     if (mode) {
       this.capturedPointers.set(ev.pointerId, mode);
       if (mode === 'draw' || mode === 'text') this.dragBegan.add(ev.pointerId);
+    } else if (button === 0) {
+      // A blank-surface primary press may become a camera pan. Report that intent
+      // before the drag threshold so expensive idle work cannot race the first move.
+      this.viewportPointerIds.add(ev.pointerId);
+      this.recomputeViewportInteraction();
     }
 
     if (this.enablePointerCapture) {
@@ -329,6 +366,7 @@ export class InputController {
           }
         }
         if (this.dragBegan.has(ev.pointerId) && (panDx || panDy) && info.button === 0) {
+          this.beginViewportMotion();
           this.camera.panByScreen(panDx, panDy);
           this.events.onChange?.();
         }
@@ -343,6 +381,7 @@ export class InputController {
     const info = this.pointers.get(ev.pointerId);
     const had = this.pointers.delete(ev.pointerId);
     if (!had) return;
+    this.viewportPointerIds.delete(ev.pointerId);
 
     const wasPinching = this.pinch != null;
     const didDrag = this.dragBegan.has(ev.pointerId);
@@ -377,7 +416,9 @@ export class InputController {
     if (this.pointers.size === 0) {
       this.setInteracting(false);
       this.clearWheelIdleTimer();
+      this.wheelViewportActive = false;
     }
+    this.recomputeViewportInteraction();
 
     ev.preventDefault();
   };
@@ -387,6 +428,7 @@ export class InputController {
     const isPinching = touchIds.length >= 2;
     if (!isPinching) {
       this.pinch = null;
+      this.recomputeViewportInteraction();
       return;
     }
 
@@ -412,6 +454,7 @@ export class InputController {
       startZoom: this.camera.zoom,
       worldAnchor: this.camera.screenToWorld(center),
     };
+    this.recomputeViewportInteraction();
     this.setInteracting(true);
   }
 
@@ -433,6 +476,7 @@ export class InputController {
     const factor = dist / pinch.startDist;
     const nextZoom = pinch.startZoom * (Number.isFinite(factor) ? factor : 1);
 
+    this.beginViewportMotion();
     this.camera.setZoomKeepingWorldPoint(nextZoom, pinch.worldAnchor, center);
     this.events.onChange?.();
   }
@@ -448,6 +492,7 @@ export class InputController {
       const delta = this.normalizeWheelDeltaForZoom(primaryDelta, ev.deltaMode);
       const factor = WHEEL_ZOOM_BASE ** (-delta);
       const nextZoom = this.camera.zoom * (Number.isFinite(factor) ? factor : 1);
+      this.beginViewportMotion();
       this.camera.setZoomAtScreen(nextZoom, pos);
       this.events.onChange?.();
       ev.preventDefault();
@@ -457,6 +502,7 @@ export class InputController {
     if (ev.ctrlKey) {
       const factor = WHEEL_ZOOM_BASE ** (-(ev.deltaY * TRACKPAD_PINCH_ZOOM_SENSITIVITY));
       const nextZoom = this.camera.zoom * (Number.isFinite(factor) ? factor : 1);
+      this.beginViewportMotion();
       this.camera.setZoomAtScreen(nextZoom, pos);
       this.events.onChange?.();
       ev.preventDefault();
@@ -466,6 +512,7 @@ export class InputController {
     const panX = ev.deltaX;
     const panY = ev.deltaY;
     if (panX || panY) {
+      this.beginViewportMotion();
       this.camera.panByScreen(panX, panY);
       this.events.onChange?.();
     }

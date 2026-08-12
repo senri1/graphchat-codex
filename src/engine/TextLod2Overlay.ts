@@ -279,7 +279,6 @@ export class TextLod2Overlay {
   private readonly content: HTMLDivElement;
   private readonly highlights: HTMLDivElement;
   private readonly highlightEls: HTMLDivElement[] = [];
-  private readonly keepLayoutWarm: boolean;
 
   private readonly menu: HTMLDivElement;
   private readonly menuCopyBtn: HTMLButtonElement;
@@ -751,11 +750,9 @@ export class TextLod2Overlay {
       trigger?: AnnotatePointerTrigger | null,
     ) => void;
     zIndex?: number;
-    keepLayoutWarm?: boolean;
     textStyle?: { fontFamily?: string; fontSizePx?: number; lineHeight?: number; color?: string };
   }) {
     this.host = opts.host;
-    this.keepLayoutWarm = Boolean(opts.keepLayoutWarm);
     this.onRequestCloseSelection = opts.onRequestCloseSelection;
     this.onRequestAction = opts.onRequestAction;
     this.onRequestSelect = opts.onRequestSelect;
@@ -787,7 +784,7 @@ export class TextLod2Overlay {
 
     const root = document.createElement('div');
     root.className = 'gc-textLod2';
-    root.style.display = this.keepLayoutWarm ? 'block' : 'none';
+    root.style.display = 'none';
     root.style.visibility = 'hidden';
     root.style.position = 'absolute';
     root.style.left = '0';
@@ -806,7 +803,7 @@ export class TextLod2Overlay {
     scaled.style.left = '0';
     scaled.style.top = '0';
     scaled.style.transformOrigin = '0 0';
-    scaled.style.willChange = 'transform';
+    scaled.style.willChange = 'auto';
     this.scaled = scaled;
 
     const content = document.createElement('div');
@@ -1160,8 +1157,9 @@ export class TextLod2Overlay {
     const z = Math.max(0.001, Number.isFinite(opts.zoom) ? opts.zoom : 1);
     this.lastZoom = z;
 
-    this.root.style.display = 'block';
+    if (this.root.style.display !== 'block') this.root.style.display = 'block';
     this.root.style.visibility = 'visible';
+    if (this.scaled.style.willChange !== 'transform') this.scaled.style.willChange = 'transform';
     this.root.style.pointerEvents = this.interactive ? 'auto' : 'none';
     this.root.style.left = `${Math.round(opts.screenRect.x)}px`;
     this.root.style.top = `${Math.round(opts.screenRect.y)}px`;
@@ -1227,6 +1225,7 @@ export class TextLod2Overlay {
   }
 
   hide(): void {
+    if (this.visibleNodeId === null && this.root.style.display === 'none') return;
     this.scrollSession.flush();
     this.programmaticScrollTarget = null;
     this.visibleNodeId = null;
@@ -1243,7 +1242,8 @@ export class TextLod2Overlay {
     this.clearHighlights();
     this.closeMenu({ suppressCallback: true });
     this.root.style.visibility = 'hidden';
-    this.root.style.display = this.keepLayoutWarm ? 'block' : 'none';
+    this.root.style.display = 'none';
+    this.scaled.style.willChange = 'auto';
   }
 
   discardRenderedContent(nodeId?: string): void {
@@ -1258,7 +1258,8 @@ export class TextLod2Overlay {
     } catch {
       this.content.innerHTML = '';
     } finally {
-      this.root.style.display = this.visibleNodeId || this.keepLayoutWarm ? 'block' : 'none';
+      this.root.style.display = this.visibleNodeId ? 'block' : 'none';
+      this.scaled.style.willChange = this.visibleNodeId ? 'transform' : 'auto';
     }
   }
 

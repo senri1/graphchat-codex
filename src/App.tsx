@@ -121,10 +121,11 @@ import {
   type CodexThreadSummary,
 } from './codex/threadImport';
 import {
-  buildLegacyHistory,
+  buildLegacyHistoryProjection,
   hasUserPrefaceContext,
   isChainedUserTextHistoryNode,
   isClaudeCodeHistoryInjectionEndpoint,
+  isFailedAssistantHistoryNode,
   isLegacyContinuationNode,
   type CodexInjectedMessage,
 } from './codex/legacyHistory';
@@ -426,7 +427,11 @@ function isCodexHistoryInjectionEndpoint(
   meta: ChatRuntimeMeta,
   node: ChatNode | null | undefined,
 ): node is Extract<ChatNode, { kind: 'text' }> {
-  return isLegacyContinuationEndpoint(meta, node) || isClaudeCodeHistoryInjectionEndpoint(node);
+  return (
+    isLegacyContinuationEndpoint(meta, node) ||
+    isClaudeCodeHistoryInjectionEndpoint(node) ||
+    isFailedAssistantHistoryNode(node)
+  );
 }
 
 function resolveClaudeCodeSourceForUserNode(nodes: ChatNode[], userNodeId: string): {
@@ -3438,6 +3443,14 @@ export default function App() {
       }, durationMs);
     }
   };
+  const showOmittedHistoryFailures = (count: number) => {
+    if (count <= 0) return;
+    showToast(
+      `Continuing with ${count} failed assistant response${count === 1 ? '' : 's'} omitted from history.`,
+      'info',
+      6200,
+    );
+  };
 
   useEffect(() => {
     return () => {
@@ -5035,7 +5048,9 @@ export default function App() {
         return;
       }
       try {
-        legacyHistory = buildLegacyHistory(state.nodes, parentNode.id);
+        const projection = buildLegacyHistoryProjection(state.nodes, sourceResolution.parentNodeId);
+        legacyHistory = projection.messages;
+        showOmittedHistoryFailures(projection.omittedFailures.length);
       } catch (error: any) {
         const message = error?.message || 'Failed to build the GraphChat branch history.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, { content: message, isGenerating: false, llmError: message });
@@ -5415,7 +5430,7 @@ export default function App() {
     let legacyHistory: CodexInjectedMessage[] = [];
     if (sourceResolution.parentNodeId && !sourceResolution.source) {
       const parentNode = state.nodes.find((node) => node.id === sourceResolution.parentNodeId) ?? null;
-      if (isClaudeCodeAssistantNode(parentNode)) {
+      if (isClaudeCodeAssistantNode(parentNode) && !isFailedAssistantHistoryNode(parentNode)) {
         const message =
           'Cannot continue this Claude Code branch because the parent response is missing its Claude Code session id.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, {
@@ -5429,7 +5444,11 @@ export default function App() {
         showToast(message, 'error', 6200);
         return;
       }
-      if (!isLegacyContinuationNode(parentNode) && !isLocalUserTextHistoryEndpoint(parentNode)) {
+      if (
+        !isLegacyContinuationNode(parentNode) &&
+        !isLocalUserTextHistoryEndpoint(parentNode) &&
+        !isFailedAssistantHistoryNode(parentNode)
+      ) {
         const message = 'Reply from a completed response or editable document to start a Claude Code branch.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, {
           content: message,
@@ -5443,7 +5462,9 @@ export default function App() {
         return;
       }
       try {
-        legacyHistory = buildLegacyHistory(state.nodes, parentNode.id);
+        const projection = buildLegacyHistoryProjection(state.nodes, sourceResolution.parentNodeId);
+        legacyHistory = projection.messages;
+        showOmittedHistoryFailures(projection.omittedFailures.length);
       } catch (error: any) {
         const message = error?.message || 'Failed to build the GraphChat branch history.';
         updateStoredTextNode(args.chatId, args.assistantNodeId, {
@@ -10211,10 +10232,15 @@ export default function App() {
           ? normalizeCodexConversationRef(parentNode.codexRef)
           : null;
       const validHistoryEndpoint = claudeCodeSelected
-        ? isLegacyContinuationNode(parentNode)
+        ? isLegacyContinuationNode(parentNode) || isFailedAssistantHistoryNode(parentNode)
         : isCodexHistoryInjectionEndpoint(meta, parentNode);
       const validLocalUserHistoryEndpoint = isLocalUserTextHistoryEndpoint(parentNode);
-      if (claudeCodeSelected && isClaudeCodeAssistantNode(parentNode) && !parentRef) {
+      if (
+        claudeCodeSelected &&
+        isClaudeCodeAssistantNode(parentNode) &&
+        !parentRef &&
+        !isFailedAssistantHistoryNode(parentNode)
+      ) {
         showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
         return null;
       }
@@ -10675,10 +10701,15 @@ export default function App() {
           ? normalizeCodexConversationRef(parent.codexRef)
           : null;
       const validHistoryEndpoint = claudeCodeSelected
-        ? isLegacyContinuationNode(parent)
+        ? isLegacyContinuationNode(parent) || isFailedAssistantHistoryNode(parent)
         : isCodexHistoryInjectionEndpoint(meta, parent);
       const validLocalUserHistoryEndpoint = isLocalUserTextHistoryEndpoint(parent);
-      if (claudeCodeSelected && isClaudeCodeAssistantNode(parent) && !parentRef) {
+      if (
+        claudeCodeSelected &&
+        isClaudeCodeAssistantNode(parent) &&
+        !parentRef &&
+        !isFailedAssistantHistoryNode(parent)
+      ) {
         showToast('Cannot continue this Claude Code branch because the parent response is missing its session id.', 'error', 6200);
         return null;
       }

@@ -9,6 +9,20 @@ function cleanString(value) {
   return typeof value === 'string' ? value.trim() : String(value ?? '').trim();
 }
 
+function claudeCodeResultError(message) {
+  const errors = Array.isArray(message?.errors)
+    ? message.errors.map(cleanString).filter(Boolean)
+    : [];
+  if (errors.length > 0) return errors.join('\n');
+
+  const result = cleanString(message?.result);
+  if (result) return result;
+
+  const subtype = cleanString(message?.subtype);
+  if (subtype && subtype !== 'success') return `Claude Code ended with ${subtype}.`;
+  return 'Claude Code reported an error.';
+}
+
 function executableNames(platform = process.platform) {
   return platform === 'win32' ? ['claude.exe', 'claude', 'claude.cmd'] : ['claude'];
 }
@@ -537,11 +551,7 @@ class ClaudeCodeProcessManager extends EventEmitter {
             sessionId: eventSessionId(sessionId),
             status: success ? 'completed' : 'failed',
             result: typeof message.result === 'string' ? message.result : '',
-            error: success
-              ? null
-              : Array.isArray(message.errors)
-                ? message.errors.map(cleanString).filter(Boolean).join('\n')
-                : `Claude Code ended with ${cleanString(message.subtype) || 'an error'}.`,
+            error: success ? null : claudeCodeResultError(message),
             usage: message.usage ?? null,
             costUsd: Number.isFinite(Number(message.total_cost_usd)) ? Number(message.total_cost_usd) : null,
           });

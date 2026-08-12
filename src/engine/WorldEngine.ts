@@ -740,6 +740,8 @@ export class WorldEngine {
 
   private raf: number | null = null;
   private interacting = false;
+  private viewportInteractionActive = false;
+  private viewportMotionActive = false;
   private textScrollInteracting = false;
   private textScrollPersistPending = false;
 
@@ -799,7 +801,22 @@ export class WorldEngine {
     canStartHandoff: (deadline) => {
       const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
       const inputHasSettled = now - this.lastHoverPointerMoveAt >= 120;
-      return inputHasSettled && (deadline.didTimeout || deadline.timeRemaining() >= 6);
+      const inputPending = (() => {
+        try {
+          const scheduling = (navigator as Navigator & {
+            scheduling?: { isInputPending?: (opts?: { includeContinuous?: boolean }) => boolean };
+          }).scheduling;
+          return Boolean(scheduling?.isInputPending?.({ includeContinuous: true }));
+        } catch {
+          return false;
+        }
+      })();
+      return (
+        !this.viewportInteractionActive &&
+        !inputPending &&
+        inputHasSettled &&
+        (deadline.didTimeout || deadline.timeRemaining() >= 6)
+      );
     },
     onExpire: (record) => {
       if (record.requiresRasterHandoff) {
@@ -869,6 +886,7 @@ export class WorldEngine {
   private readonly textRasterQueueByNodeId = new Map<string, TextRasterJob>();
   private readonly textRasterInFlightKeys = new Set<string>();
   private readonly textRasterRetryAfterBySig = new Map<string, number>();
+  private textRasterAbortController: AbortController | null = null;
   private textRasterRunning = false;
   private textRasterGeneration = 0;
 
@@ -1183,13 +1201,15 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       onInteractingChange: (v) => {
         if (v) {
           this.textHoverHandoff.cancel();
-          this.suspendRasterQueueWorkForInteraction();
+          if (!this.viewportInteractionActive) this.suspendRasterQueueWorkForInteraction();
         }
         this.interacting = v;
         this.requestRender();
         if (!this.isRasterWorkSuspended()) this.kickRasterQueuesAfterViewportUpdate();
         this.emitDebug({ force: true });
       },
+      onViewportInteractionChange: (v) => this.setViewportInteractionActive(v),
+      onViewportMotionChange: (v) => this.setViewportMotionActive(v),
       onPointerDown: (p, info) => this.handlePointerDown(p, info),
       onPointerMove: (p, info) => this.handlePointerMove(p, info),
       onPointerUp: (p, info) => this.handlePointerUp(p, info),
@@ -3599,7 +3619,34 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private isRasterWorkSuspended(): boolean {
-    return this.interacting || this.textScrollInteracting;
+    return this.interacting || this.viewportInteractionActive || this.textScrollInteracting;
+  }
+
+  private setViewportInteractionActive(next: boolean): void {
+    if (this.viewportInteractionActive === next) return;
+    this.viewportInteractionActive = next;
+
+    if (next) {
+      this.lastHoverPointerMoveAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      this.suspendRasterQueueWorkForInteraction();
+    }
+
+    this.requestRender();
+    if (!this.isRasterWorkSuspended()) this.kickRasterQueuesAfterViewportUpdate();
+  }
+
+  private setViewportMotionActive(next: boolean): void {
+    if (this.viewportMotionActive === next) return;
+    this.viewportMotionActive = next;
+
+    if (next) {
+      this.textHoverHandoff.cancel();
+      this.hoverTextNodeId = null;
+      this.hoverPdfPage = null;
+      this.hoverNodeHeaderButton = null;
+    }
+
+    this.requestRender();
   }
 
   private setTextScrollInteracting(next: boolean): void {
@@ -3619,6 +3666,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   }
 
   private suspendRasterQueueWorkForInteraction(): void {
+    this.textRasterAbortController?.abort();
     this.textRasterGeneration += 1;
     this.textRasterQueueByNodeId.clear();
     this.fullTextNodeRasterGeneration += 1;
@@ -3665,7 +3713,15 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
 	        if (this.textRasterCache.has(job.key)) continue;
 
+        // Always yield once after dequeue. Pointer/wheel input already waiting in the
+        // event queue gets a chance to raise the viewport gate before DOM raster work.
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 0));
+        if (this.isRasterWorkSuspended()) return;
+        if (this.textRasterGeneration !== gen) return;
+
         this.textRasterInFlightKeys.add(job.key);
+        let abortController: AbortController | null = null;
+        let aborted = false;
 	        try {
             const stillWanted = (() => {
               const node = this.nodes.find((n): n is TextNode => n.kind === 'text' && n.id === job.nodeId) ?? null;
@@ -3678,6 +3734,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
             })();
             if (!stillWanted) continue;
 
+            abortController = new AbortController();
+            this.textRasterAbortController = abortController;
             const res = await rasterizeHtmlToImage(job.html, {
               width: job.width,
               height: job.height,
@@ -3689,6 +3747,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
               scrollX: job.scrollX,
               scrollY: job.scrollY,
               scrollGutterPx: this.getTextScrollGutterPx(),
+              signal: abortController.signal,
             });
 	          if (this.textRasterGeneration !== gen) {
             this.closeImage(res.image);
@@ -3740,7 +3799,9 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           } else {
             this.requestRender();
           }
-        } catch {
+        } catch (error) {
+          aborted = abortController?.signal.aborted === true || (error as { name?: unknown })?.name === 'AbortError';
+          if (aborted) continue;
           this.textRasterRetryAfterBySig.set(job.sig, performance.now() + 1500);
           const activeHandoff = this.textHoverHandoff.getState();
           if (
@@ -3752,7 +3813,11 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
           }
           // Leave other missing rasters on the normal LOD0 fallback.
         } finally {
+          if (abortController && this.textRasterAbortController === abortController) {
+            this.textRasterAbortController = null;
+          }
           this.textRasterInFlightKeys.delete(job.key);
+          if (aborted && !this.isRasterWorkSuspended()) this.requestRender();
         }
 
         // Yield between rasterizations to keep the UI responsive.
@@ -4110,6 +4175,7 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     }
 
     this.textHoverHandoff.cancel();
+    this.textRasterAbortController?.abort();
     this.input.dispose();
     this.clearTextSelection({ suppressOverlayCallback: true });
     this.clearPdfTextSelection({ suppressOverlayCallback: true });
@@ -4180,8 +4246,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
 
     const t = ev.pointerType || 'mouse';
     if (t !== 'mouse') return;
-    if ((ev.buttons ?? 0) !== 0) return;
     this.lastHoverPointerMoveAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    if ((ev.buttons ?? 0) !== 0) return;
 
     const rect = this.canvas.getBoundingClientRect();
     const p: Vec2 = { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
@@ -7468,7 +7534,6 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
     if (!host) return null;
     const overlay = new TextLod2Overlay({
       host,
-      keepLayoutWarm: true,
       textStyle: this.nodeTextStyle(),
       onRequestCloseSelection: () => {
         this.clearTextSelection({ suppressOverlayCallback: true });
@@ -8139,6 +8204,10 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       if (nodeId && nodeId !== rawId && nodeId !== editingId) return concreteTarget(nodeId, 'select');
     }
 
+    // Camera movement must not carry transient hover/generation/hold DOM with it.
+    // Explicit native text interactions above remain pinned and keep their behavior.
+    if (this.viewportMotionActive) return null;
+
     if (this.hoverTextNodeId && this.hoverTextNodeId !== rawId && this.hoverTextNodeId !== editingId) {
       return concreteTarget(this.hoverTextNodeId, 'select');
     }
@@ -8212,6 +8281,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
   private computeTextStreamLod2Target(
     interactiveTarget: { nodeId: string; mode: TextLod2Mode } | null,
   ): { nodeId: string; mode: TextLod2Mode } | null {
+    if (this.viewportMotionActive) return null;
+
     const editingId = this.editingNodeId;
     const rawId = this.rawViewerNodeId;
     const view = this.worldViewportRect({ overscan: 280 });
@@ -8253,6 +8324,8 @@ If you want, I can also write the hom-set adjunction statement explicitly here:
       const pageNumber = overlay.getPageNumber();
       if (nodeId && token != null && pageNumber != null) return { nodeId, token, pageNumber };
     }
+
+    if (this.viewportMotionActive) return null;
 
     if (this.hoverPdfPage) return this.hoverPdfPage;
 
